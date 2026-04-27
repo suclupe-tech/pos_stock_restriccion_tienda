@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+
+    <record id="action_productos_mi_tienda" model="ir.actions.act_window">
+        <field name="name">Productos de mi tienda</field>
+        <field name="res_model">stock.quant</field>
+        <field name="view_mode">list,pivot,graph</field>
+        <field name="domain">[('quantity', '>', 0)]</field>
+        <field name="context">{'search_default_internal_loc': 1}</field>
+    </record>
+
+    <menuitem id="menu_productos_mi_tienda"
+                name="Productos de mi tienda"
+                parent="stock.menu_stock_inventory_control"
+                action="action_productos_mi_tienda"
+                sequence="5"
+                groups="pos_stock_restriccion_tienda.group_tienda_restringida"/>
+
+</odoo>

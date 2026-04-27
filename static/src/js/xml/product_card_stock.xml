@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<templates xml:space="preserve">
+
+    <t t-name="pos_stock_restriccion_tienda.ProductCardStock"
+        t-inherit="point_of_sale.ProductCard"
+        t-inherit-mode="extension">
+
+        <xpath expr="//article" position="inside">
+            <span class="position-absolute bottom-0 start-0 bg-warning text-dark px-2 py-1">
+                TEST STOCK
+            </span>
+        </xpath>
+
+    </t>
+
+</templates>
