@@ -6,10 +6,8 @@ class StockPicking(models.Model):
     _inherit = "stock.picking"
 
     def button_validate(self):
-
         for picking in self:
 
-            # solo transferencias internas
             if picking.picking_type_code != "internal":
                 continue
 
@@ -18,9 +16,11 @@ class StockPicking(models.Model):
             if not user_warehouse:
                 continue
 
-            destino = picking.location_dest_id.warehouse_id
+            destino_permitido = picking.location_dest_id.id in self.env["stock.location"].search([
+                ("id", "child_of", user_warehouse.view_location_id.id)
+            ]).ids
 
-            if destino and destino.id != user_warehouse.id:
+            if not destino_permitido:
                 raise UserError(
                     "Solo el almacén destino puede validar esta transferencia."
                 )

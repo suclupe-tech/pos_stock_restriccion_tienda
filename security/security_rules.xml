@@ -34,11 +34,16 @@
         <field name="domain_force">[('id', '=', user.warehouse_id.id)]</field>
     </record>
 
-    <record id="rule_stock_picking_type_tienda" model="ir.rule">
-        <field name="name">Tipos de operación solo de mi almacén</field>
-        <field name="model_id" ref="stock.model_stock_picking_type"/>
-        <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
-        <field name="domain_force">[('warehouse_id', '=', user.warehouse_id.id)]</field>
-    </record>
+    <record id="rule_stock_picking_tienda" model="ir.rule">
+    <field name="name">Transferencias relacionadas a mi almacén</field>
+    <field name="model_id" ref="stock.model_stock_picking"/>
+    <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
+    <field name="domain_force">
+        ['|',
+            ('location_id', 'child_of', user.warehouse_id.view_location_id.id),
+            ('location_dest_id', 'child_of', user.warehouse_id.view_location_id.id)
+        ]
+    </field>
+</record>
 
 </odoo>
