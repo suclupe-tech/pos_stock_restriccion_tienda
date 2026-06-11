@@ -1,28 +1,36 @@
 from odoo import models
-from odoo.exceptions import UserError
 
 
 class StockPicking(models.Model):
     _inherit = "stock.picking"
 
-    def button_validate(self):
-        for picking in self:
+    def default_get(self, fields_list):
+        res = super().default_get(fields_list)
 
-            if picking.picking_type_code != "internal":
-                continue
+        user = self.env.user
 
-            user_warehouse = self.env.user.warehouse_id
+        if not user.has_group("pos_stock_restriccion_tienda.group_tienda_restringida"):
+            return res
 
-            if not user_warehouse:
-                continue
+        if not user.warehouse_id:
+            return res
 
-            destino_permitido = picking.location_dest_id.id in self.env["stock.location"].search([
-                ("id", "child_of", user_warehouse.view_location_id.id)
-            ]).ids
+        if (
+            user.allowed_warehouse_ids
+            and user.warehouse_id not in user.allowed_warehouse_ids
+        ):
+            return res
 
-            if not destino_permitido:
-                raise UserError(
-                    "Solo el almacén destino puede validar esta transferencia."
-                )
+        picking_type = self.env["stock.picking.type"].search(
+            [
+                ("warehouse_id", "=", user.warehouse_id.id),
+                ("code", "=", "internal"),
+                ("visible_tienda", "=", True),
+            ],
+            limit=1,
+        )
 
-        return super().button_validate()
+        if picking_type:
+            res["picking_type_id"] = picking_type.id
+
+        return res

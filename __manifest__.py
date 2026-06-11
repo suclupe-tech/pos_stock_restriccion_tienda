@@ -11,6 +11,8 @@
         "security/ir.model.access.csv",
         "views/res_users_views.xml",
         "views/stock_quant_views.xml",
+        "views/stock_picking_type_views.xml",
+        "views/stock_picking_menu_views.xml",
     ],
     "installable": True,
     "application": False,
