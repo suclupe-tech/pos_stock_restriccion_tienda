@@ -154,6 +154,7 @@ class ResUsers(models.Model):
         location_view_ids = warehouses.mapped("view_location_id").ids
 
         domain = [
+            ("picking_type_id.code", "=", "internal"),
             ("picking_type_id.visible_tienda", "=", True),
             "|",
             ("location_id", "child_of", location_view_ids),
@@ -166,5 +167,7 @@ class ResUsers(models.Model):
             "res_model": "stock.picking",
             "view_mode": "list,form",
             "domain": domain,
-            "context": {},
+            "context": {
+                "search_default_internal": 1,
+            },
         }
