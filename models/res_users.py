@@ -127,22 +127,6 @@ class ResUsers(models.Model):
             },
         }
 
-    @api.depends("warehouse_id", "allowed_warehouse_ids", "company_id")
-    def _compute_destination_location_ids(self):
-        Warehouse = self.env["stock.warehouse"].sudo()
-
-        for user in self:
-            own_warehouses = user.allowed_warehouse_ids or user.warehouse_id
-
-            other_warehouses = Warehouse.search(
-                [
-                    ("company_id", "=", user.company_id.id),
-                    ("id", "not in", own_warehouses.ids),
-                ]
-            )
-
-            user.destination_location_ids = other_warehouses.mapped("lot_stock_id")
-
     def _compute_restriccion_config_estado(self):
         for user in self:
             tiene_configuracion = (
@@ -233,6 +217,7 @@ class ResUsers(models.Model):
             "views": [(False, "list"), (False, "form")],
             "domain": domain,
             "context": {
+                "search_default_internal": 1,
                 "default_picking_type_id": picking_type.id if picking_type else False,
                 "default_location_id": (
                     picking_type.default_location_src_id.id
