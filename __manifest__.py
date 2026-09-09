@@ -5,10 +5,10 @@
     "author": "Detalles Textiles",
     "category": "Inventory/Point of Sale",
     "depends": ["base", "stock", "point_of_sale"],
+    "assets": {},
     "data": [
         "security/security_groups.xml",
         "security/security_rules.xml",
-        "security/ir.model.access.csv",
         "views/res_users_views.xml",
         "views/stock_quant_views.xml",
         "views/stock_picking_type_views.xml",

@@ -6,5 +6,10 @@ class ProductTemplate(models.Model):
 
     def _load_pos_data_fields(self, config_id):
         fields = super()._load_pos_data_fields(config_id)
-        fields += ["qty_available", "virtual_available"]
+
+        # Evitar duplicados en la lista de campos
+        for field_name in ["qty_available", "virtual_available"]:
+            if field_name not in fields:
+                fields.append(field_name)
+
         return fields

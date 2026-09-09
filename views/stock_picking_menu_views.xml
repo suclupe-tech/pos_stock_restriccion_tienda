@@ -1,18 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <odoo>
+    <record id="view_picking_form_restriccion_tienda" model="ir.ui.view">
+        <field name="name">stock.picking.form.restriccion.tienda</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form"/>
+        <field name="arch" type="xml">
 
-    <record id="action_transferencias_mi_tienda_server" model="ir.actions.server">
-        <field name="name">Transferencias de mi tienda</field>
-        <field name="model_id" ref="base.model_res_users"/>
-        <field name="state">code</field>
-        <field name="code">action = env.user.action_transferencias_mi_tienda()</field>
-    </record>
+            <xpath expr="//group/field[@name='picking_type_id']" position="attributes">
+                <attribute name="domain">context.get('restrict_store_transfer') and [('id', 'in', context.get('allowed_transfer_picking_type_ids', []))] or [('code', 'in', ('incoming', 'outgoing', 'internal'))]</attribute>
+            </xpath>
 
-    <menuitem id="menu_transferencias_mi_tienda"
-                name="Transferencias de mi tienda"
-                parent="stock.menu_stock_inventory_control"
-                action="action_transferencias_mi_tienda_server"
-                sequence="7"
-                groups="pos_stock_restriccion_tienda.group_tienda_restringida"/>
+            <xpath expr="//field[@name='location_id'][@groups='stock.group_stock_multi_locations']" position="attributes">
+                <attribute name="domain">context.get('restrict_store_transfer') and [('id', 'in', context.get('allowed_transfer_source_location_ids', []))] or []</attribute>
+            </xpath>
+
+            <xpath expr="//field[@name='location_dest_id'][@groups='stock.group_stock_multi_locations']" position="attributes">
+                <attribute name="domain">context.get('restrict_store_transfer') and [('id', 'in', context.get('allowed_transfer_destination_location_ids', []))] or [('usage', '!=', 'view')]</attribute>
+            </xpath>
+
+        </field>
+    </record>            
 
 </odoo>

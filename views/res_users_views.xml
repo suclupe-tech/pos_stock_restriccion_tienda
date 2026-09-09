@@ -9,7 +9,7 @@
                 <page string="Restricción Tienda">
 
                     <group string="Estado de configuración">
-                        <field name="restriccion_config_nivel" invisible="1"/>
+                        <field name="restriccion_config_nivel" invisible="True"/>
                         <field name="restriccion_config_estado"
                             widget="badge"
                             readonly="1"

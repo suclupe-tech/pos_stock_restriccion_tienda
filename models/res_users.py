@@ -14,6 +14,12 @@ class ResUsers(models.Model):
         string="Almacenes permitidos",
     )
 
+    destination_location_ids = fields.Many2many(
+        "stock.location",
+        string="Ubicaciones disponibles como destino",
+        compute="_compute_destination_location_ids",
+    )
+
     pos_config_id = fields.Many2one(
         "pos.config", string="Punto de Venta predeterminado"
     )
@@ -58,18 +64,33 @@ class ResUsers(models.Model):
             ):
                 user.allowed_pos_config_ids = [(4, user.pos_config_id.id)]
 
+    @api.depends("warehouse_id", "allowed_warehouse_ids", "company_id")
+    def _compute_destination_location_ids(self):
+        Warehouse = self.env["stock.warehouse"].sudo()
+
+        for user in self:
+            own_warehouses = user.allowed_warehouse_ids or user.warehouse_id
+
+            other_warehouses = Warehouse.search(
+                [
+                    ("company_id", "=", user.company_id.id),
+                    ("id", "not in", own_warehouses.ids),
+                ]
+            )
+
+            user.destination_location_ids = other_warehouses.mapped("lot_stock_id")
+
     def action_productos_mi_tienda(self):
         user = self.env.user
+        warehouses = user.allowed_warehouse_ids or user.warehouse_id
 
-        warehouses = user.allowed_warehouse_ids
-        if not warehouses and user.warehouse_id:
-            warehouses = user.warehouse_id
-
-        location_ids = warehouses.mapped("lot_stock_id").ids
+        locations = self.env["stock.location"].search(
+            [("warehouse_id", "in", warehouses.ids), ("usage", "=", "internal")]
+        )
 
         domain = [
             ("quantity", ">", 0),
-            ("location_id", "in", location_ids),
+            ("location_id", "in", locations.ids),
         ]
 
         return {
@@ -85,15 +106,14 @@ class ResUsers(models.Model):
 
     def action_revision_stock_tiendas(self):
         user = self.env.user
+        warehouses = user.allowed_warehouse_ids or user.warehouse_id
 
-        warehouses = user.allowed_warehouse_ids
-        if not warehouses and user.warehouse_id:
-            warehouses = user.warehouse_id
-
-        location_ids = warehouses.mapped("lot_stock_id").ids
+        locations = self.env["stock.location"].search(
+            [("warehouse_id", "in", warehouses.ids), ("usage", "=", "internal")]
+        )
 
         domain = [
-            ("location_id", "in", location_ids),
+            ("location_id", "in", locations.ids),
         ]
 
         return {
@@ -106,6 +126,22 @@ class ResUsers(models.Model):
                 "search_default_internal_loc": 1,
             },
         }
+
+    @api.depends("warehouse_id", "allowed_warehouse_ids", "company_id")
+    def _compute_destination_location_ids(self):
+        Warehouse = self.env["stock.warehouse"].sudo()
+
+        for user in self:
+            own_warehouses = user.allowed_warehouse_ids or user.warehouse_id
+
+            other_warehouses = Warehouse.search(
+                [
+                    ("company_id", "=", user.company_id.id),
+                    ("id", "not in", own_warehouses.ids),
+                ]
+            )
+
+            user.destination_location_ids = other_warehouses.mapped("lot_stock_id")
 
     def _compute_restriccion_config_estado(self):
         for user in self:
@@ -145,26 +181,68 @@ class ResUsers(models.Model):
                 user.restriccion_config_nivel = "ok"
 
     def action_transferencias_mi_tienda(self):
+        self.ensure_one()
         user = self.env.user
 
-        warehouses = user.allowed_warehouse_ids
-        if not warehouses and user.warehouse_id:
-            warehouses = user.warehouse_id
+        # 1. Obtener los almacenes permitidos (1 para vendedor, 3 para supervisor)
+        warehouses = user.allowed_warehouse_ids or user.warehouse_id
 
-        location_view_ids = warehouses.mapped("view_location_id").ids
+        source_locations = self.env["stock.location"].search(
+            [
+                ("warehouse_id", "in", warehouses.ids),
+                ("usage", "=", "internal"),
+            ]
+        )
 
-        domain = [
-            ("picking_type_id.visible_tienda", "=", True),
-            "|",
-            ("location_id", "child_of", location_view_ids),
-            ("location_dest_id", "child_of", location_view_ids),
-        ]
+        allowed_picking_types = self.env["stock.picking.type"].search(
+            [
+                ("warehouse_id", "in", warehouses.ids),
+                ("code", "=", "internal"),
+            ]
+        )
+
+        destination_locations = user.destination_location_ids
+
+        # 2. Buscar el tipo de operación "internal" perteneciente al almacén predeterminado o permitidos
+        picking_type = False
+        if user.warehouse_id:
+            picking_type = self.env["stock.picking.type"].search(
+                [
+                    ("warehouse_id", "=", user.warehouse_id.id),
+                    ("code", "=", "internal"),
+                ],
+                limit=1,
+            )
+
+        if not picking_type and warehouses:
+            picking_type = self.env["stock.picking.type"].search(
+                [("warehouse_id", "in", warehouses.ids), ("code", "=", "internal")],
+                limit=1,
+            )
+
+        # 3. Filtrar en el listado las transferencias pertenecientes a sus almacenes permitidos
+        domain = [("picking_type_id.code", "=", "internal")]
+        if warehouses:
+            domain.append(("picking_type_id.warehouse_id", "in", warehouses.ids))
 
         return {
             "type": "ir.actions.act_window",
-            "name": "Transferencias de mi tienda",
+            "name": "Transferencias de Mi Tienda",
             "res_model": "stock.picking",
             "view_mode": "list,form",
+            "views": [(False, "list"), (False, "form")],
             "domain": domain,
-            "context": {},
+            "context": {
+                "default_picking_type_id": picking_type.id if picking_type else False,
+                "default_location_id": (
+                    picking_type.default_location_src_id.id
+                    if picking_type and picking_type.default_location_src_id
+                    else False
+                ),
+                "default_location_dest_id": False,
+                "restrict_store_transfer": True,
+                "allowed_transfer_picking_type_ids": allowed_picking_types.ids,
+                "allowed_transfer_source_location_ids": source_locations.ids,
+                "allowed_transfer_destination_location_ids": destination_locations.ids,
+            },
         }

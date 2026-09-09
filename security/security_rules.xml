@@ -1,46 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <odoo>
 
-    <record id="rule_stock_picking_tienda" model="ir.rule">
-        <field name="name">Transferencias relacionadas a mis almacenes permitidos</field>
-        <field name="model_id" ref="stock.model_stock_picking"/>
-        <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
-        <field name="domain_force">
-            ['|',
-                ('location_id', 'child_of', user.allowed_warehouse_ids.mapped('view_location_id').ids),
-                ('location_dest_id', 'child_of', user.allowed_warehouse_ids.mapped('view_location_id').ids)
-            ]
-        </field>
-    </record>
-
-    <record id="rule_stock_quant_tienda" model="ir.rule">
-        <field name="name">Existencias solo de mis almacenes permitidos</field>
-        <field name="model_id" ref="stock.model_stock_quant"/>
-        <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
-        <field name="domain_force">
-            [('location_id', 'child_of', user.allowed_warehouse_ids.mapped('view_location_id').ids)]
-        </field>
-    </record>
-
-    <record id="rule_stock_warehouse_tienda" model="ir.rule">
-        <field name="name">Solo mis almacenes permitidos</field>
-        <field name="model_id" ref="stock.model_stock_warehouse"/>
-        <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
-        <field name="domain_force">[('id', 'in', user.allowed_warehouse_ids.ids)]</field>
-    </record>
-
-    <!-- NO ACTIVAR TODAVÍA.
-         Puede bloquear ubicaciones de tránsito y romper transferencias entre tiendas.
-    <record id="rule_stock_location_tienda" model="ir.rule">
-        <field name="name">Ubicaciones solo de mis almacenes permitidos</field>
-        <field name="model_id" ref="stock.model_stock_location"/>
-        <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
-        <field name="domain_force">
-            [('id', 'child_of', user.allowed_warehouse_ids.mapped('view_location_id').ids)]
-        </field>
-    </record>
-    -->
-
+    <!-- 1. Puntos de Venta permitidos en el Dashboard/Pantalla del POS -->
     <record id="rule_pos_config_tienda" model="ir.rule">
         <field name="name">Solo puntos de venta permitidos</field>
         <field name="model_id" ref="point_of_sale.model_pos_config"/>
@@ -48,42 +9,54 @@
         <field name="domain_force">[('id', 'in', user.allowed_pos_config_ids.ids)]</field>
     </record>
 
-    <record id="rule_stock_picking_type_tienda" model="ir.rule">
-        <field name="name">Tipos de operación visibles para mis almacenes</field>
-        <field name="model_id" ref="stock.model_stock_picking_type"/>
-        <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
-        <field name="domain_force">
-            [
-                ('warehouse_id', 'in', user.allowed_warehouse_ids.ids),
-                ('visible_tienda', '=', True)
-            ]
-        </field>
-        <field name="perm_read" eval="True"/>
-        <field name="perm_write" eval="False"/>
-        <field name="perm_create" eval="False"/>
-        <field name="perm_unlink" eval="False"/>
-    </record>
-
+    <!-- 2. Ventas POS visibles únicamente del local asignado -->
     <record id="rule_pos_order_tienda" model="ir.rule">
         <field name="name">Ventas POS solo de mis tiendas permitidas</field>
         <field name="model_id" ref="point_of_sale.model_pos_order"/>
         <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
         <field name="domain_force">[('config_id', 'in', user.allowed_pos_config_ids.ids)]</field>
-        <field name="perm_read" eval="True"/>
-        <field name="perm_write" eval="False"/>
-        <field name="perm_create" eval="False"/>
-        <field name="perm_unlink" eval="False"/>
     </record>
 
+    <!-- 3. Sesiones POS limitadas a su tienda -->
     <record id="rule_pos_session_tienda" model="ir.rule">
         <field name="name">Sesiones POS solo de mis tiendas permitidas</field>
         <field name="model_id" ref="point_of_sale.model_pos_session"/>
         <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
         <field name="domain_force">[('config_id', 'in', user.allowed_pos_config_ids.ids)]</field>
-        <field name="perm_read" eval="True"/>
-        <field name="perm_write" eval="False"/>
-        <field name="perm_create" eval="False"/>
-        <field name="perm_unlink" eval="False"/>
+    </record>
+
+    <!-- 4. Almacenes visibles únicamente los permitidos en la ficha del usuario -->
+    <record id="rule_stock_warehouse_tienda" model="ir.rule">
+        <field name="name">Solo mis almacenes permitidos</field>
+        <field name="model_id" ref="stock.model_stock_warehouse"/>
+        <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
+        <field name="domain_force">[('id', 'in', user.allowed_warehouse_ids.ids)]</field>
+    </record>
+
+    <!-- 5. Ubicaciones limitadas a sus almacenes permitidos -->
+    <record id="rule_stock_location_tienda" model="ir.rule">
+        <field name="name">Solo ubicaciones de mis almacenes permitidos</field>
+        <field name="model_id" ref="stock.model_stock_location"/>
+        <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
+        <field name="domain_force">
+            ['|', '|',
+            ('warehouse_id', '=', False),
+            ('warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+            ('id', 'in', user.destination_location_ids.ids)]
+        </field>
+    </record>
+
+    <!-- 6. Ocultar tarjetas de operación de otros almacenes en la Vista General de Inventario -->
+    <record id="rule_stock_picking_type_tienda" model="ir.rule">
+        <field name="name">Solo tipos de operacion de mis almacenes permitidos</field>
+        <field name="model_id" ref="stock.model_stock_picking_type"/>
+        <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
+        <field name="domain_force">
+            ['|', 
+            ('warehouse_id', '=', False), 
+            ('warehouse_id', 'in', user.allowed_warehouse_ids.ids)]
+        </field>
+        <field name="active" eval="True"/>
     </record>
 
 </odoo>
