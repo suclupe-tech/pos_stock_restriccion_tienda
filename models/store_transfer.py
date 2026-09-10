@@ -1,5 +1,6 @@
 from odoo import api, fields, models, _
 from odoo.exceptions import UserError, ValidationError
+from odoo.tools.float_utils import float_compare
 
 
 class StoreTransfer(models.Model):
@@ -150,6 +151,39 @@ class StoreTransfer(models.Model):
         required=True,
         readonly=True,
     )
+
+    # ============================================================
+    # ROL DEL USUARIO EN LA TRANSFERENCIA
+    #
+    # Permite saber si el usuario conectado pertenece al almacén
+    # origen o al almacén destino.
+    #
+    # Se utilizará para controlar botones y campos de la pantalla.
+    # ============================================================
+    is_source_user = fields.Boolean(
+        string="Es usuario origen",
+        compute="_compute_transfer_user_role",
+    )
+
+    is_destination_user = fields.Boolean(
+        string="Es usuario destino",
+        compute="_compute_transfer_user_role",
+    )
+
+    @api.depends("source_warehouse_id", "destination_warehouse_id")
+    @api.depends_context("uid")
+    def _compute_transfer_user_role(self):
+        user = self.env.user
+
+        # Almacenes que tiene permitidos el usuario conectado.
+        allowed_warehouses = user.allowed_warehouse_ids or user.warehouse_id
+
+        for transfer in self:
+            transfer.is_source_user = transfer.source_warehouse_id in allowed_warehouses
+
+            transfer.is_destination_user = (
+                transfer.destination_warehouse_id in allowed_warehouses
+            )
 
     line_ids = fields.One2many(
         "dt.store.transfer.line",
@@ -403,14 +437,15 @@ class StoreTransfer(models.Model):
                 "este movimiento. La transferencia no fue enviada."
             )
 
-        # --------------------------------------------------------
-        # 10. Guardar la cantidad declarada originalmente.
+        # ============================================================
+        # GUARDAR CANTIDADES DEL ENVÍO
         #
-        # Será importante si posteriormente el destino reporta
-        # que realmente recibió una cantidad diferente.
-        # --------------------------------------------------------
+        # Conservamos la cantidad original para auditoría y también
+        # registramos cuánto producto quedó físicamente en tránsito.
+        # ============================================================
         for line in self.line_ids:
             line.original_qty_sent = line.qty_sent
+            line.qty_in_transit = line.qty_sent
 
         # --------------------------------------------------------
         # 11. Registrar quién hizo el envío y cambiar el estado.
@@ -425,6 +460,196 @@ class StoreTransfer(models.Model):
         )
 
         return True
+
+    # ============================================================
+    # CONFIRMAR RECEPCIÓN
+    #
+    # El almacén destino registra la cantidad recibida.
+    #
+    # - Si todas las cantidades coinciden, la mercadería pasa
+    #   de tránsito al almacén destino.
+    #
+    # - Si existe alguna diferencia, NO se mueve el stock al
+    #   destino y la transferencia queda OBSERVADA para que el
+    #   almacén origen corrija primero la cantidad enviada.
+    # ============================================================
+    def action_confirm_receipt(self):
+        self.ensure_one()
+
+        # Solo puede recibirse una transferencia que esté
+        # actualmente pendiente de recepción.
+        if self.state != "waiting":
+            raise UserError(
+                "Esta transferencia no se encuentra pendiente de recepción."
+            )
+
+        # La recepción solo puede realizarla un usuario que
+        # pertenezca al almacén destino.
+        if not self.is_destination_user:
+            raise UserError(
+                "Solo el almacén de destino puede confirmar esta recepción."
+            )
+
+        if not self.line_ids:
+            raise UserError("La transferencia no contiene productos.")
+
+        # ========================================================
+        # COMPROBAR DIFERENCIAS
+        # Comparamos lo declarado por origen con lo contado
+        # físicamente por el almacén destino.
+        # ========================================================
+        lines_with_difference = self.line_ids.filtered(
+            lambda line: float_compare(
+                line.qty_received,
+                line.qty_sent,
+                precision_rounding=line.uom_id.rounding,
+            )
+            != 0
+        )
+
+        # ========================================================
+        # SI EXISTE DIFERENCIA
+        #
+        # No se recibe ningún producto todavía.
+        # La transferencia queda OBSERVADA y deberá ser corregida
+        # por el almacén origen antes de volver a validarse.
+        # ========================================================
+        if lines_with_difference:
+            self.write(
+                {
+                    "state": "observed",
+                    "observed_by_id": self.env.user.id,
+                    "observed_date": fields.Datetime.now(),
+                }
+            )
+
+        # ============================================================
+        # MENSAJE Y ACTUALIZACIÓN DE LA PANTALLA
+        #
+        # Después de confirmar la recepción, recargamos el formulario
+        # para mostrar inmediatamente el estado RECIBIDA y ocultar
+        # el botón "Confirmar recepción".
+        # ============================================================
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Recepción confirmada",
+                "message": (
+                    "La mercadería fue recibida correctamente "
+                    "y ya ingresó al stock del almacén destino."
+                ),
+                "type": "success",
+                "sticky": False,
+                # Recarga la vista después de mostrar la notificación.
+                "next": {
+                    "type": "ir.actions.client",
+                    "tag": "reload",
+                },
+            },
+        }
+
+        # ========================================================
+        # RECEPCIÓN SIN DIFERENCIAS
+        #
+        # Si todo coincide, recién aquí movemos la mercadería
+        # desde tránsito hacia el almacén destino.
+        # ========================================================
+        transit_location = self.company_id.internal_transit_location_id
+
+        if not transit_location:
+            raise UserError("No se encontró la ubicación de tránsito de la empresa.")
+
+        # Utilizar el tipo de traslado interno correspondiente
+        # al almacén que está recibiendo la mercadería.
+        picking_type = self.env["stock.picking.type"].search(
+            [
+                ("warehouse_id", "=", self.destination_warehouse_id.id),
+                ("code", "=", "internal"),
+            ],
+            limit=1,
+        )
+
+        if not picking_type:
+            raise UserError(
+                "No se encontró el tipo de operación de traslado interno "
+                "del almacén destino."
+            )
+
+        # Preparar los productos que pasarán de tránsito al destino.
+        move_values = []
+
+        for line in self.line_ids:
+            move_values.append(
+                (
+                    0,
+                    0,
+                    {
+                        "product_id": line.product_id.id,
+                        "product_uom_qty": line.qty_received,
+                        "product_uom": line.uom_id.id,
+                        "location_id": transit_location.id,
+                        "location_dest_id": self.destination_location_id.id,
+                    },
+                )
+            )
+
+        # Crear el movimiento técnico de recepción.
+        # El usuario seguirá viendo solamente TRF/xxxxx.
+        picking = self.env["stock.picking"].create(
+            {
+                "picking_type_id": picking_type.id,
+                "location_id": transit_location.id,
+                "location_dest_id": self.destination_location_id.id,
+                "partner_id": self.partner_id.id if self.partner_id else False,
+                "scheduled_date": self.scheduled_date,
+                "origin": self.name,
+                "move_ids": move_values,
+            }
+        )
+
+        # Confirmar y reservar la mercadería que está en tránsito.
+        picking.action_confirm()
+        picking.action_assign()
+
+        # Registrar como realizada exactamente la cantidad recibida.
+        for move in picking.move_ids:
+            move.quantity = move.product_uom_qty
+
+        result = picking.button_validate()
+
+        if result is not True:
+            raise UserError(
+                "Odoo requiere una validación adicional para completar "
+                "la recepción. No se finalizó la transferencia."
+            )
+
+        # ========================================================
+        # FINALIZAR LA TRANSFERENCIA
+        # Ahora sí el stock ya ingresó físicamente al destino.
+        # ========================================================
+        self.write(
+            {
+                "state": "received",
+                "received_by_id": self.env.user.id,
+                "received_date": fields.Datetime.now(),
+                "receipt_picking_id": picking.id,
+            }
+        )
+
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Recepción confirmada",
+                "message": (
+                    "La mercadería fue recibida correctamente "
+                    "y ya ingresó al stock del almacén destino."
+                ),
+                "type": "success",
+                "sticky": False,
+            },
+        }
 
     @api.constrains("source_warehouse_id", "destination_warehouse_id")
     def _check_different_warehouses(self):
@@ -474,6 +699,19 @@ class StoreTransferLine(models.Model):
 
     original_qty_sent = fields.Float(
         string="Cantidad inicial",
+        readonly=True,
+        copy=False,
+    )
+
+    # ============================================================
+    # CANTIDAD QUE ACTUALMENTE ESTÁ EN TRÁNSITO
+    #
+    # Se utilizará para controlar correcciones cuando el destino
+    # reporte que recibió más o menos de lo registrado inicialmente.
+    # Es un dato técnico y no se mostrará a la vendedora.
+    # ============================================================
+    qty_in_transit = fields.Float(
+        string="Cantidad en tránsito",
         readonly=True,
         copy=False,
     )
