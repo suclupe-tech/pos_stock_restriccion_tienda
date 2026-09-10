@@ -61,6 +61,18 @@
                             invisible="state != 'waiting' or not is_destination_user"/>
 
                     <!-- ============================================================
+                        CONFIRMAR CORRECCIÓN
+
+                        Solo aparece al almacén ORIGEN cuando la transferencia
+                        se encuentra OBSERVADA.
+                        ============================================================ -->
+                    <button name="action_confirm_correction"
+                            string="Confirmar corrección"
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'observed' or not is_source_user"/>        
+
+                    <!-- ============================================================
                         ESTADO DEL TRASLADO
                         ============================================================ -->
                     <field name="state"
@@ -151,14 +163,18 @@
                                 </list>
 
                             </field>
-
-
                             <!-- ============================================================
                                 PRODUCTOS - DESPUÉS DEL ENVÍO
 
-                                Ya no se pueden agregar ni eliminar productos.
-                                El destino únicamente puede registrar la cantidad recibida
-                                cuando el traslado se encuentra "Por recibir".
+                                DESTINO:
+                                Puede registrar "Cantidad recibida" únicamente cuando la
+                                transferencia se encuentra POR RECIBIR.
+
+                                ORIGEN:
+                                Si la transferencia queda OBSERVADA, puede corregir solamente
+                                la "Cantidad enviada" de las líneas que tienen diferencia.
+
+                                No se permite agregar ni eliminar productos después del envío.
                                 ============================================================ -->
                             <field name="line_ids"
                                 invisible="state == 'draft'">
@@ -167,30 +183,33 @@
                                     create="0"
                                     delete="0">
 
-                                    <!-- Producto enviado: no modificable -->
+                                    <!-- Campo técnico utilizado para saber qué línea tiene
+                                        diferencia. No se muestra a la vendedora. -->
+                                    <field name="has_difference"
+                                        column_invisible="1"/>
+
                                     <field name="product_id"
                                         string="Producto"
                                         readonly="1"/>
 
-                                    <!-- Cantidad declarada por el origen -->
+                                    <!-- Solo el almacén origen puede corregir esta cantidad
+                                        cuando la transferencia está OBSERVADA y la línea
+                                        tiene una diferencia. -->
                                     <field name="qty_sent"
                                         string="Cantidad enviada"
-                                        readonly="1"/>
+                                        readonly="not (parent.state == 'observed' and parent.is_source_user and has_difference)"/>
 
                                     <field name="uom_id"
                                         string="Unidad"
                                         readonly="1"/>
 
-                                    <!--
-                                        Único campo editable para el almacén destino
-                                        mientras la transferencia está Por recibir.
-                                    -->
+                                    <!-- Solo el almacén destino registra la cantidad recibida
+                                        mientras la transferencia está POR RECIBIR. -->
                                     <field name="qty_received"
                                         string="Cantidad recibida"
                                         readonly="parent.state != 'waiting' or not parent.is_destination_user"/>
 
                                 </list>
-
                             </field>
                         </page>
 

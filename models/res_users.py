@@ -64,6 +64,20 @@ class ResUsers(models.Model):
             ):
                 user.allowed_pos_config_ids = [(4, user.pos_config_id.id)]
 
+    # ============================================================
+    # UBICACIONES DESTINO PERMITIDAS
+    #
+    # Permite que una tienda pueda seleccionar como destino el
+    # stock principal de los demás almacenes de la compañía.
+    #
+    # También incluye las ubicaciones padre necesarias para que
+    # Odoo pueda mostrar correctamente nombres como:
+    #       WH/Existencias
+    #
+    # Esto NO concede acceso al contenido completo del almacén
+    # destino; solamente a las ubicaciones necesarias para
+    # identificar el destino de una transferencia.
+    # ============================================================
     @api.depends("warehouse_id", "allowed_warehouse_ids", "company_id")
     def _compute_destination_location_ids(self):
         Warehouse = self.env["stock.warehouse"].sudo()
@@ -71,6 +85,7 @@ class ResUsers(models.Model):
         for user in self:
             own_warehouses = user.allowed_warehouse_ids or user.warehouse_id
 
+            # Buscar los demás almacenes de la misma compañía.
             other_warehouses = Warehouse.search(
                 [
                     ("company_id", "=", user.company_id.id),
@@ -78,7 +93,27 @@ class ResUsers(models.Model):
                 ]
             )
 
-            user.destination_location_ids = other_warehouses.mapped("lot_stock_id")
+            # Ubicaciones principales que pueden seleccionarse
+            # como destino: WH/Existencias, TDHU/Existencias, etc.
+            destination_locations = other_warehouses.mapped("lot_stock_id")
+
+            # ----------------------------------------------------
+            # Odoo necesita poder leer también los padres de esas
+            # ubicaciones para construir el nombre completo.
+            #
+            # Ejemplo:
+            #       WH
+            #        └── Existencias
+            # ----------------------------------------------------
+            locations_with_parents = destination_locations
+
+            parents = destination_locations.mapped("location_id")
+
+            while parents:
+                locations_with_parents |= parents
+                parents = parents.mapped("location_id")
+
+            user.destination_location_ids = locations_with_parents
 
     def action_productos_mi_tienda(self):
         user = self.env.user
@@ -199,7 +234,6 @@ class ResUsers(models.Model):
             "res_model": "dt.store.transfer",
             "view_mode": "list,form",
             "views": [(False, "list"), (False, "form")],
-
             # Solo muestra transferencias donde uno de los
             # almacenes del usuario participa como origen o destino.
             "domain": [
@@ -207,7 +241,6 @@ class ResUsers(models.Model):
                 ("source_warehouse_id", "in", warehouses.ids),
                 ("destination_warehouse_id", "in", warehouses.ids),
             ],
-
             "context": {
                 # El origen se coloca automáticamente según la tienda.
                 "default_source_warehouse_id": (

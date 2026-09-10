@@ -246,6 +246,34 @@ class StoreTransfer(models.Model):
     )
 
     # ============================================================
+    # AUDITORÍA DE CORRECCIONES
+    #
+    # Guarda quién corrigió una transferencia observada,
+    # cuándo se realizó la corrección y qué movimientos técnicos
+    # se generaron para ajustar el stock que está en tránsito.
+    # ============================================================
+
+    corrected_by_id = fields.Many2one(
+        "res.users",
+        string="Corregido por",
+        readonly=True,
+        copy=False,
+    )
+
+    corrected_date = fields.Datetime(
+        string="Fecha de corrección",
+        readonly=True,
+        copy=False,
+    )
+
+    correction_picking_ids = fields.Many2many(
+        "stock.picking",
+        string="Movimientos de corrección",
+        readonly=True,
+        copy=False,
+    )
+
+    # ============================================================
     # NÚMERO AUTOMÁTICO DE TRANSFERENCIA
     # Al crear un documento genera TRF/000001, TRF/000002, etc.
     # ============================================================
@@ -357,8 +385,10 @@ class StoreTransfer(models.Model):
             quantities_by_product[line.product_id] += line.qty_sent
 
         # --------------------------------------------------------
-        # 7. Comprobar que realmente exista stock disponible
-        #    en el almacén origen antes de permitir el envío.
+        # 7. COMPROBAR STOCK DISPONIBLE
+        #
+        # Primero validamos TODOS los productos antes de crear
+        # cualquier movimiento de inventario.
         # --------------------------------------------------------
         Quant = self.env["stock.quant"]
 
@@ -369,35 +399,41 @@ class StoreTransfer(models.Model):
                 self.source_location_id,
             )
 
-            if available_qty < requested_qty:
+            if float_compare(
+                available_qty,
+                requested_qty,
+                precision_rounding=product.uom_id.rounding,
+            ) < 0:
                 raise UserError(
                     f"Stock insuficiente para {product.display_name}.\n\n"
                     f"Disponible: {available_qty}\n"
                     f"Solicitado: {requested_qty}"
                 )
 
-            # ============================================================
-            # PREPARAR LOS PRODUCTOS DEL MOVIMIENTO DE SALIDA
-            # Esta lista almacenará todas las prendas que se moverán
-            # desde el almacén origen hacia la ubicación de tránsito.
-            # ============================================================
-            move_values = []
+        # ========================================================
+        # 8. PREPARAR LOS PRODUCTOS DEL MOVIMIENTO DE SALIDA
+        #
+        # Una vez comprobado que existe stock suficiente para
+        # todos los productos, construimos las líneas que Odoo
+        # moverá desde Origen -> Tránsito.
+        # ========================================================
+        move_values = []
 
-            for line in self.line_ids:
+        for line in self.line_ids:
 
-                move_values.append(
-                    (
-                        0,
-                        0,
-                        {
-                            "product_id": line.product_id.id,
-                            "product_uom_qty": line.qty_sent,
-                            "product_uom": line.uom_id.id,
-                            "location_id": self.source_location_id.id,
-                            "location_dest_id": transit_location.id,
-                        },
-                    )
+            move_values.append(
+                (
+                    0,
+                    0,
+                    {
+                        "product_id": line.product_id.id,
+                        "product_uom_qty": line.qty_sent,
+                        "product_uom": line.uom_id.id,
+                        "location_id": self.source_location_id.id,
+                        "location_dest_id": transit_location.id,
+                    },
                 )
+            )
 
         # --------------------------------------------------------
         # 9. Crear el movimiento técnico de salida.
@@ -476,15 +512,19 @@ class StoreTransfer(models.Model):
     def action_confirm_receipt(self):
         self.ensure_one()
 
-        # Solo puede recibirse una transferencia que esté
-        # actualmente pendiente de recepción.
+        # --------------------------------------------------------
+        # VALIDAR ESTADO
+        # Solo una transferencia "Por recibir" puede procesarse.
+        # --------------------------------------------------------
         if self.state != "waiting":
             raise UserError(
                 "Esta transferencia no se encuentra pendiente de recepción."
             )
 
-        # La recepción solo puede realizarla un usuario que
-        # pertenezca al almacén destino.
+        # --------------------------------------------------------
+        # VALIDAR USUARIO
+        # Solo el almacén destino puede registrar la recepción.
+        # --------------------------------------------------------
         if not self.is_destination_user:
             raise UserError(
                 "Solo el almacén de destino puede confirmar esta recepción."
@@ -495,8 +535,9 @@ class StoreTransfer(models.Model):
 
         # ========================================================
         # COMPROBAR DIFERENCIAS
-        # Comparamos lo declarado por origen con lo contado
-        # físicamente por el almacén destino.
+        #
+        # Comparamos lo que origen declaró como enviado contra
+        # lo que destino contó físicamente.
         # ========================================================
         lines_with_difference = self.line_ids.filtered(
             lambda line: float_compare(
@@ -508,13 +549,13 @@ class StoreTransfer(models.Model):
         )
 
         # ========================================================
-        # SI EXISTE DIFERENCIA
+        # CASO 1: EXISTE DIFERENCIA
         #
         # No se recibe ningún producto todavía.
-        # La transferencia queda OBSERVADA y deberá ser corregida
-        # por el almacén origen antes de volver a validarse.
+        # Todo permanece en tránsito hasta que origen corrija.
         # ========================================================
         if lines_with_difference:
+
             self.write(
                 {
                     "state": "observed",
@@ -523,45 +564,40 @@ class StoreTransfer(models.Model):
                 }
             )
 
-        # ============================================================
-        # MENSAJE Y ACTUALIZACIÓN DE LA PANTALLA
-        #
-        # Después de confirmar la recepción, recargamos el formulario
-        # para mostrar inmediatamente el estado RECIBIDA y ocultar
-        # el botón "Confirmar recepción".
-        # ============================================================
-        return {
-            "type": "ir.actions.client",
-            "tag": "display_notification",
-            "params": {
-                "title": "Recepción confirmada",
-                "message": (
-                    "La mercadería fue recibida correctamente "
-                    "y ya ingresó al stock del almacén destino."
-                ),
-                "type": "success",
-                "sticky": False,
-                # Recarga la vista después de mostrar la notificación.
-                "next": {
-                    "type": "ir.actions.client",
-                    "tag": "reload",
+            return {
+                "type": "ir.actions.client",
+                "tag": "display_notification",
+                "params": {
+                    "title": "Diferencia en recepción",
+                    "message": (
+                        "La cantidad recibida no coincide con la cantidad "
+                        "enviada. La transferencia quedó OBSERVADA. "
+                        "No se ingresó mercadería al almacén destino."
+                    ),
+                    "type": "warning",
+                    "sticky": True,
+                    "next": {
+                        "type": "ir.actions.client",
+                        "tag": "reload",
+                    },
                 },
-            },
-        }
+            }
 
         # ========================================================
-        # RECEPCIÓN SIN DIFERENCIAS
+        # CASO 2: RECEPCIÓN SIN DIFERENCIAS
         #
-        # Si todo coincide, recién aquí movemos la mercadería
-        # desde tránsito hacia el almacén destino.
+        # Recién cuando todas las cantidades coinciden se mueve
+        # la mercadería desde tránsito hacia el almacén destino.
         # ========================================================
         transit_location = self.company_id.internal_transit_location_id
 
         if not transit_location:
             raise UserError("No se encontró la ubicación de tránsito de la empresa.")
 
-        # Utilizar el tipo de traslado interno correspondiente
-        # al almacén que está recibiendo la mercadería.
+        # --------------------------------------------------------
+        # Buscar el tipo de traslado interno correspondiente
+        # al almacén destino.
+        # --------------------------------------------------------
         picking_type = self.env["stock.picking.type"].search(
             [
                 ("warehouse_id", "=", self.destination_warehouse_id.id),
@@ -576,7 +612,9 @@ class StoreTransfer(models.Model):
                 "del almacén destino."
             )
 
-        # Preparar los productos que pasarán de tránsito al destino.
+        # --------------------------------------------------------
+        # Preparar los movimientos de cada producto.
+        # --------------------------------------------------------
         move_values = []
 
         for line in self.line_ids:
@@ -594,8 +632,12 @@ class StoreTransfer(models.Model):
                 )
             )
 
-        # Crear el movimiento técnico de recepción.
-        # El usuario seguirá viendo solamente TRF/xxxxx.
+        # ========================================================
+        # CREAR RECEPCIÓN TÉCNICA
+        #
+        # La vendedora seguirá viendo solamente TRF/xxxxx.
+        # Este stock.picking queda como movimiento técnico interno.
+        # ========================================================
         picking = self.env["stock.picking"].create(
             {
                 "picking_type_id": picking_type.id,
@@ -608,16 +650,18 @@ class StoreTransfer(models.Model):
             }
         )
 
-        # Confirmar y reservar la mercadería que está en tránsito.
+        # Confirmar y reservar la mercadería.
         picking.action_confirm()
         picking.action_assign()
 
-        # Registrar como realizada exactamente la cantidad recibida.
+        # Registrar exactamente las cantidades recibidas.
         for move in picking.move_ids:
             move.quantity = move.product_uom_qty
 
         result = picking.button_validate()
 
+        # Si Odoo solicita un asistente adicional, detenemos el flujo
+        # para evitar dejar nuestra transferencia inconsistente.
         if result is not True:
             raise UserError(
                 "Odoo requiere una validación adicional para completar "
@@ -625,8 +669,8 @@ class StoreTransfer(models.Model):
             )
 
         # ========================================================
-        # FINALIZAR LA TRANSFERENCIA
-        # Ahora sí el stock ya ingresó físicamente al destino.
+        # FINALIZAR RECEPCIÓN
+        # El producto ya se encuentra en el almacén destino.
         # ========================================================
         self.write(
             {
@@ -637,6 +681,10 @@ class StoreTransfer(models.Model):
             }
         )
 
+        # --------------------------------------------------------
+        # Mostrar confirmación y refrescar automáticamente la vista.
+        # Al recargar desaparecerá el botón "Confirmar recepción".
+        # --------------------------------------------------------
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
@@ -648,6 +696,260 @@ class StoreTransfer(models.Model):
                 ),
                 "type": "success",
                 "sticky": False,
+                "next": {
+                    "type": "ir.actions.client",
+                    "tag": "reload",
+                },
+            },
+        }
+
+    # ============================================================
+    # CONFIRMAR CORRECCIÓN DE TRANSFERENCIA OBSERVADA
+    #
+    # El almacén origen corrige la cantidad enviada para que
+    # coincida con lo que el almacén destino contó físicamente.
+    #
+    # Ejemplo:
+    #   Cantidad actualmente en tránsito: 2
+    #   Cantidad recibida por destino:    1
+    #   Origen corrige enviada:           2 -> 1
+    #
+    # Resultado:
+    #   1 unidad vuelve de Tránsito -> Origen
+    #   La transferencia vuelve a "Por recibir".
+    # ============================================================
+    def action_confirm_correction(self):
+        self.ensure_one()
+
+        # --------------------------------------------------------
+        # VALIDACIONES DE ESTADO Y USUARIO
+        # --------------------------------------------------------
+        if self.state != "observed":
+            raise UserError("Solo se pueden corregir transferencias observadas.")
+
+        if not self.is_source_user:
+            raise UserError(
+                "Solo el almacén de origen puede corregir esta transferencia."
+            )
+
+        # --------------------------------------------------------
+        # La corrección solo puede confirmarse cuando todas las
+        # cantidades enviadas ya coincidan con lo contado por
+        # el almacén destino.
+        # --------------------------------------------------------
+        lines_pending = self.line_ids.filtered(
+            lambda line: float_compare(
+                line.qty_sent,
+                line.qty_received,
+                precision_rounding=line.uom_id.rounding,
+            )
+            != 0
+        )
+
+        if lines_pending:
+            raise UserError(
+                "Todavía existen productos cuya cantidad enviada "
+                "no coincide con la cantidad recibida."
+            )
+
+        transit_location = self.company_id.internal_transit_location_id
+
+        if not transit_location:
+            raise UserError("No se encontró la ubicación de tránsito de la empresa.")
+
+        # --------------------------------------------------------
+        # Usamos el tipo de traslado interno correspondiente
+        # al almacén origen.
+        # --------------------------------------------------------
+        picking_type = self.env["stock.picking.type"].search(
+            [
+                ("warehouse_id", "=", self.source_warehouse_id.id),
+                ("code", "=", "internal"),
+            ],
+            limit=1,
+        )
+
+        if not picking_type:
+            raise UserError(
+                "No se encontró el tipo de traslado interno " "del almacén origen."
+            )
+
+        correction_pickings = self.env["stock.picking"]
+
+        # ========================================================
+        # PROCESAR LAS DIFERENCIAS DE STOCK
+        # ========================================================
+        for line in self.line_ids:
+
+            comparison = float_compare(
+                line.qty_sent,
+                line.qty_in_transit,
+                precision_rounding=line.uom_id.rounding,
+            )
+
+            # ----------------------------------------------------
+            # CASO 1
+            # Origen reduce la cantidad enviada.
+            #
+            # Ejemplo:
+            # En tránsito: 2
+            # Corregido:   1
+            #
+            # Se devuelve 1 unidad:
+            # Tránsito -> Origen
+            # ----------------------------------------------------
+            if comparison < 0:
+                qty_to_return = line.qty_in_transit - line.qty_sent
+
+                picking = self.env["stock.picking"].create(
+                    {
+                        "picking_type_id": picking_type.id,
+                        "location_id": transit_location.id,
+                        "location_dest_id": self.source_location_id.id,
+                        "origin": "%s - Corrección" % self.name,
+                        "move_ids": [
+                            (
+                                0,
+                                0,
+                                {
+                                    "product_id": line.product_id.id,
+                                    "product_uom_qty": qty_to_return,
+                                    "product_uom": line.uom_id.id,
+                                    "location_id": transit_location.id,
+                                    "location_dest_id": self.source_location_id.id,
+                                },
+                            )
+                        ],
+                    }
+                )
+
+                picking.action_confirm()
+                picking.action_assign()
+
+                for move in picking.move_ids:
+                    move.quantity = move.product_uom_qty
+
+                result = picking.button_validate()
+
+                if result is not True:
+                    raise UserError(
+                        "Odoo requiere una validación adicional para "
+                        "completar la devolución de la diferencia."
+                    )
+
+                correction_pickings |= picking
+
+            # ----------------------------------------------------
+            # CASO 2
+            # Origen aumenta la cantidad enviada.
+            #
+            # Ejemplo:
+            # En tránsito: 10
+            # Corregido:   11
+            #
+            # Se envía 1 unidad adicional:
+            # Origen -> Tránsito
+            # ----------------------------------------------------
+            elif comparison > 0:
+                qty_to_send = line.qty_sent - line.qty_in_transit
+
+                available_qty = self.env["stock.quant"]._get_available_quantity(
+                    line.product_id,
+                    self.source_location_id,
+                )
+
+                if (
+                    float_compare(
+                        available_qty,
+                        qty_to_send,
+                        precision_rounding=line.uom_id.rounding,
+                    )
+                    < 0
+                ):
+                    raise UserError(
+                        "No hay stock suficiente de %s para enviar "
+                        "la diferencia de %.2f."
+                        % (line.product_id.display_name, qty_to_send)
+                    )
+
+                picking = self.env["stock.picking"].create(
+                    {
+                        "picking_type_id": picking_type.id,
+                        "location_id": self.source_location_id.id,
+                        "location_dest_id": transit_location.id,
+                        "origin": "%s - Corrección" % self.name,
+                        "move_ids": [
+                            (
+                                0,
+                                0,
+                                {
+                                    "product_id": line.product_id.id,
+                                    "product_uom_qty": qty_to_send,
+                                    "product_uom": line.uom_id.id,
+                                    "location_id": self.source_location_id.id,
+                                    "location_dest_id": transit_location.id,
+                                },
+                            )
+                        ],
+                    }
+                )
+
+                picking.action_confirm()
+                picking.action_assign()
+
+                for move in picking.move_ids:
+                    move.quantity = move.product_uom_qty
+
+                result = picking.button_validate()
+
+                if result is not True:
+                    raise UserError(
+                        "Odoo requiere una validación adicional para "
+                        "completar el envío de la diferencia."
+                    )
+
+                correction_pickings |= picking
+
+            # La cantidad técnica que queda en tránsito debe
+            # coincidir con la nueva cantidad corregida.
+            line.qty_in_transit = line.qty_sent
+
+        # ========================================================
+        # FINALIZAR LA CORRECCIÓN
+        #
+        # Conservamos la cantidad que destino ya contó y volvemos
+        # a dejar la transferencia pendiente de recepción.
+        # ========================================================
+        values = {
+            "state": "waiting",
+            "corrected_by_id": self.env.user.id,
+            "corrected_date": fields.Datetime.now(),
+        }
+
+        # Agregamos los movimientos de corrección al historial
+        # sin borrar correcciones anteriores.
+        if correction_pickings:
+            values["correction_picking_ids"] = [
+                (4, picking.id) for picking in correction_pickings
+            ]
+
+        self.write(values)
+
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Transferencia corregida",
+                "message": (
+                    "La diferencia fue corregida y la transferencia "
+                    "volvió a quedar pendiente de recepción."
+                ),
+                "type": "success",
+                "sticky": False,
+                "next": {
+                    "type": "ir.actions.client",
+                    "tag": "reload",
+                },
             },
         }
 
