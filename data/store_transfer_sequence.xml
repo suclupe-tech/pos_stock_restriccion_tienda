@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+
+    <!-- ============================================================
+         SECUENCIA DE TRANSFERENCIAS ENTRE TIENDAS
+         Genera automáticamente:
+         TRF/000001, TRF/000002, TRF/000003...
+         ============================================================ -->
+    <record id="seq_dt_store_transfer" model="ir.sequence">
+        <field name="name">Transferencias entre Tiendas</field>
+        <field name="code">dt.store.transfer</field>
+        <field name="prefix">TRF/</field>
+        <field name="padding">6</field>
+        <field name="company_id" eval="False"/>
+    </record>
+
+</odoo>

@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+
+    <!-- ============================================================
+         VISTA DE LISTA
+         Muestra todas las transferencias entre tiendas.
+         ============================================================ -->
+    <record id="view_dt_store_transfer_list" model="ir.ui.view">
+        <field name="name">dt.store.transfer.list</field>
+        <field name="model">dt.store.transfer</field>
+        <field name="arch" type="xml">
+            <list string="Transferencias entre Tiendas">
+                <field name="name"/>
+                <!--Origen y destino visible para las tiendas -->
+                <field name="source_location_id"/>
+                <field name="destination_location_id"/>
+                <field name="sent_date"/>
+                <field name="state"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ============================================================
+         FORMULARIO DE TRASLADO INTERNO
+         Mantiene una estructura similar al traslado estándar de Odoo,
+         pero utiliza nuestro flujo de doble validación.
+         ============================================================ -->
+    <record id="view_dt_store_transfer_form" model="ir.ui.view">
+        <field name="name">dt.store.transfer.form</field>
+        <field name="model">dt.store.transfer</field>
+        <field name="arch" type="xml">
+
+            <form string="Traslado interno">
+
+                <!-- ====================================================
+                     ESTADOS DEL NUEVO FLUJO
+                     ==================================================== -->
+                <header>
+
+                    <!-- ============================================================
+                        ENVIAR MERCADERÍA
+                        Solo aparece mientras el traslado está en Borrador.
+                        Confirma la salida del almacén origen y deja la mercadería
+                        pendiente de recepción en la ubicación técnica de tránsito.
+                        ============================================================ -->
+                    <button name="action_send_transfer"
+                            string="Enviar mercadería"
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'draft'"/>
+
+                    <!-- ============================================================
+                        ESTADO DEL TRASLADO
+                        ============================================================ -->
+                    <field name="state"
+                        widget="statusbar"
+                        statusbar_visible="draft,waiting,observed,received"/>
+
+                </header>
+
+                <sheet>
+
+                    <!-- Número de transferencia -->
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name"/>
+                        </h1>
+                    </div>
+
+                    <!-- ====================================================
+                         DATOS PRINCIPALES
+                         Campos similares a los que ya utiliza Odoo.
+                         ==================================================== -->
+                    <group>
+                        <group>
+
+                            <!-- Contacto opcional -->
+                            <field name="partner_id"
+                                   string="Contacto"
+                                   placeholder="Por ejemplo, proveedor o responsable"/>
+
+                            <!-- Origen automático según el usuario conectado -->
+                            <field name="source_location_id"
+                                   string="Ubicación de origen"
+                                   readonly="1"/>
+
+                            <!-- Campo técnico invisible para limitar destinos -->
+                            <field name="allowed_destination_location_ids"
+                                   invisible="1"/>
+
+                            <!-- Tienda o almacén al que se enviará -->
+                            <field name="destination_location_id"
+                                   string="Ubicación de destino"
+                                   domain="[('id', 'in', allowed_destination_location_ids)]"/>
+
+                            <!-- Fecha prevista del traslado -->
+                            <field name="scheduled_date"
+                                   string="Fecha programada"/>
+
+                            <!-- Guía, pedido u otra referencia -->
+                            <field name="origin_reference"
+                                   string="Documento origen"
+                                   placeholder="Por ejemplo, guía o pedido"/>
+
+                        </group>
+                    </group>
+
+                    <!-- ====================================================
+                         OPERACIONES
+                         Aquí el origen registra prendas y cantidades.
+                         ==================================================== -->
+                    <notebook>
+
+                        <page string="Operaciones">
+                            <field name="line_ids">
+                                <list editable="bottom">
+
+                                    <field name="product_id"
+                                           string="Producto"/>
+
+                                    <field name="qty_sent"
+                                           string="Cantidad"/>
+
+                                    <field name="uom_id"
+                                           string="Unidad"
+                                           readonly="1"/>
+
+                                </list>
+                            </field>
+                        </page>
+
+                        <!-- =================================================
+                             INFORMACIÓN ADICIONAL
+                             Datos automáticos para control y auditoría.
+                             ================================================= -->
+                        <page string="Información adicional">
+                            <group>
+
+                                <group>
+                                    <field name="sent_by_id"
+                                           string="Enviado por"
+                                           readonly="1"/>
+
+                                    <field name="sent_date"
+                                           string="Fecha de envío"
+                                           readonly="1"/>
+                                </group>
+
+                                <group>
+                                    <field name="observed_by_id"
+                                           string="Observado por"
+                                           readonly="1"/>
+
+                                    <field name="observed_date"
+                                           string="Fecha de observación"
+                                           readonly="1"/>
+
+                                    <field name="received_by_id"
+                                           string="Recibido por"
+                                           readonly="1"/>
+
+                                    <field name="received_date"
+                                           string="Fecha de recepción"
+                                           readonly="1"/>
+                                </group>
+
+                            </group>
+                        </page>
+
+                        <!-- =================================================
+                             NOTA
+                             Espacio libre para observaciones del traslado.
+                             ================================================= -->
+                        <page string="Nota">
+                            <field name="note"
+                                   placeholder="Escriba aquí alguna observación sobre el traslado..."/>
+                        </page>
+
+                    </notebook>
+
+                </sheet>
+
+            </form>
+
+        </field>
+    </record>
+
+
+        <!-- ============================================================
+         ACCIÓN
+         Permite abrir la lista y formulario del nuevo modelo.
+         ============================================================ -->
+    <record id="action_dt_store_transfer" model="ir.actions.act_window">
+        <field name="name">Transferencias entre Tiendas</field>
+        <field name="res_model">dt.store.transfer</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>
