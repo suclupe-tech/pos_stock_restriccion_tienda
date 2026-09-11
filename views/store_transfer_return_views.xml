@@ -1,0 +1,259 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- ============================================================
+         LISTA DE DEVOLUCIONES
+
+         Aquí se visualizarán los documentos DEV/xxxxx generados
+         desde transferencias TRF que ya fueron recibidas.
+         ============================================================ -->
+    <record id="view_dt_store_transfer_return_list" model="ir.ui.view">
+
+        <field name="name">dt.store.transfer.return.list</field>
+        <field name="model">dt.store.transfer.return</field>
+
+        <field name="arch" type="xml">
+
+            <list string="Devoluciones entre Tiendas"
+                  decoration-muted="state == 'cancelled'">
+
+                <field name="name"/>
+                <field name="original_transfer_id"/>
+                <field name="source_warehouse_id"/>
+                <field name="destination_warehouse_id"/>
+                <field name="state"/>
+
+            </list>
+
+        </field>
+    </record>
+
+
+    <!-- ============================================================
+         FORMULARIO DE DEVOLUCIÓN
+
+         Muestra:
+         - TRF original
+         - origen y destino invertidos
+         - motivo
+         - cantidades recibidas y disponibles
+         - cantidad que realmente se devolverá
+         ============================================================ -->
+    <record id="view_dt_store_transfer_return_form" model="ir.ui.view">
+
+        <field name="name">dt.store.transfer.return.form</field>
+        <field name="model">dt.store.transfer.return</field>
+
+        <field name="arch" type="xml">
+
+            <form string="Devolución de Mercadería">
+                
+                <!-- ============================================================
+                     CAMPOS TÉCNICOS DE ROL
+                     Se utilizan para controlar qué usuario puede enviar
+                     o recibir la devolución.
+                     ============================================================ -->
+                <field name="is_source_user" invisible="1"/>
+                <field name="is_destination_user" invisible="1"/>                
+
+                <header>
+
+                    <!-- Los botones de envío y recepción
+                         se agregarán posteriormente. -->
+
+                    <!-- ============================================================
+                         ENVIAR DEVOLUCIÓN
+
+                         Solo aparece:
+                         - mientras DEV esté en Borrador;
+                         - al usuario del almacén que está devolviendo.
+
+                         Al confirmar:
+                         Origen devolución -> Tránsito
+                         y DEV pasa a "Por recibir".
+                         ============================================================ -->
+                    <button name="action_send_return"
+                            string="Enviar devolución"
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'draft' or not is_source_user"/>
+
+                    <!-- ============================================================
+                         CONFIRMAR RECEPCIÓN DE DEVOLUCIÓN
+
+                         Solo aparece:
+                         - cuando la DEV está "Por recibir";
+                         - al almacén destino de la devolución.
+
+                         Si las cantidades coinciden:
+                         Tránsito -> Destino devolución.
+
+                         Si no coinciden:
+                         DEV pasa a Observada y no ingresa stock.
+                         ============================================================ -->
+                    <button name="action_confirm_return_receipt"
+                            string="Confirmar recepción"
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'waiting' or not is_destination_user"/>
+
+                    <field name="state"
+                           widget="statusbar"
+                           statusbar_visible="draft,waiting,observed,received,cancelled"/>
+
+                </header>
+
+                <sheet>
+
+                    <!-- Número DEV/xxxxx -->
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name"/>
+                        </h1>
+                    </div>
+
+                    <!-- ==================================================
+                         DATOS DE LA DEVOLUCIÓN
+                         ================================================== -->
+                    <group>
+
+                        <group>
+                            <field name="original_transfer_id"/>
+                            <field name="source_warehouse_id"/>
+                            <field name="destination_warehouse_id"/>
+                        </group>
+
+                        <group>
+                            <field name="reason"
+                                   placeholder="Ejemplo: Compostura de prendas"/>
+                        </group>
+
+                    </group>
+
+                    <!-- ==================================================
+                         PRODUCTOS
+
+                         El usuario solamente podrá modificar la cantidad
+                         que desea devolver mientras esté en Borrador.
+                         ================================================== -->
+                    <notebook>
+
+                        <page string="Productos">
+
+                                                        <!-- ==================================================
+                                 PRODUCTOS EN BORRADOR
+
+                                 El almacén que devuelve puede definir solamente
+                                 la cantidad que desea devolver.
+                                 ================================================== -->
+                            <field name="line_ids"
+                                   invisible="state != 'draft'">
+
+                                <list editable="bottom"
+                                      create="0"
+                                      delete="0">
+
+                                    <field name="product_id"
+                                           string="Producto"
+                                           readonly="1"/>
+
+                                    <field name="original_received_qty"
+                                           string="Recibido originalmente"
+                                           readonly="1"/>
+
+                                    <field name="already_returned_qty"
+                                           string="Ya devuelto"
+                                           readonly="1"/>
+
+                                    <field name="available_return_qty"
+                                           string="Disponible"
+                                           readonly="1"/>
+
+                                    <field name="qty_to_return"
+                                           string="Cantidad a devolver"/>
+
+                                    <field name="uom_id"
+                                           string="Unidad"
+                                           readonly="1"/>
+
+                                </list>
+
+                            </field>
+
+
+                            <!-- ==================================================
+                                 PRODUCTOS DESPUÉS DEL ENVÍO
+
+                                 La cantidad enviada queda bloqueada.
+                                 El almacén destino solamente registra cuánto
+                                 recibió mientras la DEV esté "Por recibir".
+                                 ================================================== -->
+                            <field name="line_ids"
+                                   invisible="state == 'draft'">
+
+                                <list editable="bottom"
+                                      create="0"
+                                      delete="0">
+
+                                    <field name="product_id"
+                                           string="Producto"
+                                           readonly="1"/>
+
+                                    <field name="qty_to_return"
+                                           string="Cantidad enviada"
+                                           readonly="1"/>
+
+                                    <field name="uom_id"
+                                           string="Unidad"
+                                           readonly="1"/>
+
+                                    <field name="qty_received"
+                                           string="Cantidad recibida"
+                                           readonly="parent.state != 'waiting' or not parent.is_destination_user"/>
+
+                                </list>
+
+                            </field>
+
+                        </page>
+
+                    </notebook>
+
+                </sheet>
+
+            </form>
+
+        </field>
+    </record>
+
+
+    <!-- ============================================================
+         ACCIÓN DE DEVOLUCIONES ENTRE TIENDAS
+
+         Permite que los usuarios de tienda puedan consultar los
+         documentos DEV/xxxxx de forma independiente de los TRF.
+         ============================================================ -->
+    <record id="action_dt_store_transfer_return"
+            model="ir.actions.act_window">
+
+        <field name="name">Devoluciones</field>
+        <field name="res_model">dt.store.transfer.return</field>
+        <field name="view_mode">list,form</field>
+
+    </record>
+
+
+    <!-- ============================================================
+         MENÚ DE DEVOLUCIONES
+
+         Se mostrará dentro de Inventario para los usuarios que
+         trabajan con el flujo de transferencias entre tiendas.
+         ============================================================ -->
+    <menuitem id="menu_dt_store_transfer_return"
+              name="Devoluciones"
+              parent="stock.menu_stock_warehouse_mgmt"
+              action="action_dt_store_transfer_return"
+              groups="pos_stock_restriccion_tienda.group_tienda_restringida"
+              sequence="25"/>
+
+</odoo>

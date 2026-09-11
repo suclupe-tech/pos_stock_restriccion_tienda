@@ -94,6 +94,22 @@
                             invisible="state not in ('waiting', 'observed') or not is_source_user"/>
 
                     <!-- ============================================================
+                        DEVOLVER MERCADERÍA
+
+                        Solo aparece cuando:
+                        - La transferencia ya fue RECIBIDA.
+                        - El usuario pertenece al almacén destino.
+
+                        Crea o abre un documento DEV/xxxxx con el origen
+                        y destino invertidos respecto al TRF original.
+                        ============================================================ -->
+                    <button name="action_create_return"
+                            string="Devolver"
+                            type="object"
+                            class="btn-secondary"
+                            invisible="state != 'received' or not is_destination_user"/>
+
+                    <!-- ============================================================
                         ESTADO DEL TRASLADO
                         ============================================================ -->
                     <field name="state"

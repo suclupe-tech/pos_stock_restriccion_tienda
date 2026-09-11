@@ -1017,6 +1017,146 @@ class StoreTransfer(models.Model):
             },
         }
 
+
+    # ============================================================
+    # CREAR / ABRIR DEVOLUCIÓN DE UNA TRANSFERENCIA RECIBIDA
+    #
+    # La devolución solo puede ser iniciada por el almacén que
+    # recibió originalmente la mercadería.
+    #
+    # Ejemplo:
+    # TRF: HUANUCO -> WH
+    # DEV: WH -> HUANUCO
+    #
+    # Si ya existe una devolución activa, se abre esa misma para
+    # evitar crear documentos duplicados.
+    # ============================================================
+    def action_create_return(self):
+        self.ensure_one()
+
+        # --------------------------------------------------------
+        # La transferencia original debe estar recibida.
+        # --------------------------------------------------------
+        if self.state != "received":
+            raise UserError(
+                "Solo se pueden devolver transferencias que estén Recibidas."
+            )
+
+        # --------------------------------------------------------
+        # Solo el almacén que recibió puede iniciar la devolución.
+        # --------------------------------------------------------
+        if not self.is_destination_user:
+            raise UserError(
+                "Solo el almacén que recibió la mercadería puede "
+                "iniciar la devolución."
+            )
+
+        Return = self.env["dt.store.transfer.return"]
+        ReturnLine = self.env["dt.store.transfer.return.line"]
+
+        # --------------------------------------------------------
+        # Si ya existe una DEV activa, abrimos esa misma.
+        # Así evitamos crear varias devoluciones simultáneas.
+        # --------------------------------------------------------
+        active_return = Return.search(
+            [
+                ("original_transfer_id", "=", self.id),
+                ("state", "in", ("draft", "waiting", "observed")),
+            ],
+            limit=1,
+        )
+
+        if active_return:
+            return {
+                "type": "ir.actions.act_window",
+                "name": active_return.name,
+                "res_model": "dt.store.transfer.return",
+                "res_id": active_return.id,
+                "view_mode": "form",
+                "target": "current",
+            }
+
+        # ========================================================
+        # PREPARAR PRODUCTOS QUE TODAVÍA PUEDEN DEVOLVERSE
+        #
+        # Recibido originalmente - devoluciones ya terminadas.
+        # ========================================================
+        return_lines = []
+
+        for line in self.line_ids:
+
+            previous_return_lines = ReturnLine.search(
+                [
+                    ("original_transfer_line_id", "=", line.id),
+                    ("return_id.state", "=", "received"),
+                ]
+            )
+
+            already_returned = sum(
+                previous_return_lines.mapped("qty_received")
+            )
+
+            available_qty = max(
+                line.qty_received - already_returned,
+                0.0,
+            )
+
+            # Si este producto ya fue devuelto completamente,
+            # no necesitamos mostrarlo en una nueva devolución.
+            if float_compare(
+                available_qty,
+                0.0,
+                precision_rounding=line.uom_id.rounding,
+            ) <= 0:
+                continue
+
+            return_lines.append(
+                (
+                    0,
+                    0,
+                    {
+                        "original_transfer_line_id": line.id,
+                        "qty_to_return": 0.0,
+                    },
+                )
+            )
+
+        if not return_lines:
+            raise UserError(
+                "Todos los productos de esta transferencia ya fueron devueltos."
+            )
+
+        # ========================================================
+        # CREAR DEVOLUCIÓN
+        #
+        # El origen y destino quedan invertidos respecto al TRF.
+        # ========================================================
+        return_doc = Return.create(
+            {
+                "company_id": self.company_id.id,
+                "original_transfer_id": self.id,
+
+                # El almacén que recibió ahora será quien devuelve.
+                "source_warehouse_id": self.destination_warehouse_id.id,
+                "source_location_id": self.destination_location_id.id,
+
+                # El almacén que envió originalmente ahora recibe.
+                "destination_warehouse_id": self.source_warehouse_id.id,
+                "destination_location_id": self.source_location_id.id,
+
+                "line_ids": return_lines,
+            }
+        )
+
+        return {
+            "type": "ir.actions.act_window",
+            "name": return_doc.name,
+            "res_model": "dt.store.transfer.return",
+            "res_id": return_doc.id,
+            "view_mode": "form",
+            "target": "current",
+        }
+
     # ============================================================
     # ABRIR ASISTENTE DE ANULACIÓN
     #
