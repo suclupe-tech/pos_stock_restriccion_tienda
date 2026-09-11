@@ -1,5 +1,5 @@
 from odoo import api, fields, models, _
-from odoo.exceptions import ValidationError
+from odoo.exceptions import UserError, ValidationError
 from odoo.tools.float_utils import float_compare
 
 
@@ -210,6 +210,34 @@ class StoreTransferReturn(models.Model):
     receipt_picking_id = fields.Many2one(
         "stock.picking",
         string="Movimiento de recepción devolución",
+        readonly=True,
+        copy=False,
+    )
+
+    # ============================================================
+    # AUDITORÍA DE CORRECCIONES DE DEVOLUCIÓN
+    #
+    # Guarda quién corrigió una devolución observada,
+    # cuándo se corrigió y los movimientos técnicos generados
+    # para ajustar la cantidad que permanece en tránsito.
+    # ============================================================
+
+    corrected_by_id = fields.Many2one(
+        "res.users",
+        string="Corregido por",
+        readonly=True,
+        copy=False,
+    )
+
+    corrected_date = fields.Datetime(
+        string="Fecha de corrección",
+        readonly=True,
+        copy=False,
+    )
+
+    correction_picking_ids = fields.Many2many(
+        "stock.picking",
+        string="Movimientos de corrección",
         readonly=True,
         copy=False,
     )
@@ -569,9 +597,18 @@ class StoreTransferReturn(models.Model):
             )
 
         # Solo consideramos productos realmente enviados.
+        # ========================================================
+        # PRODUCTOS QUE REALMENTE ESTÁN EN TRÁNSITO
+        #
+        # En una primera recepción coincidirá con la cantidad
+        # enviada originalmente.
+        #
+        # Después de una corrección se utilizará la cantidad
+        # ajustada que realmente permanece en tránsito.
+        # ========================================================
         lines_to_receive = self.line_ids.filtered(
             lambda line: float_compare(
-                line.qty_to_return,
+                line.qty_in_transit,
                 0.0,
                 precision_rounding=line.uom_id.rounding,
             )
@@ -582,16 +619,19 @@ class StoreTransferReturn(models.Model):
             raise UserError("La devolución no contiene cantidades para recibir.")
 
         # ========================================================
-        # COMPROBAR DIFERENCIAS
+        # COMPARAR RECEPCIÓN CONTRA LO QUE REALMENTE ESTÁ
+        # ACTUALMENTE EN TRÁNSITO
         #
-        # Comparamos:
-        # cantidad enviada en devolución
-        # contra cantidad contada por el almacén destino.
+        # Ejemplo:
+        # Envío original:       2
+        # Corrección:           1
+        # En tránsito actual:   1
+        # Recepción esperada:   1
         # ========================================================
         lines_with_difference = lines_to_receive.filtered(
             lambda line: float_compare(
                 line.qty_received,
-                line.qty_to_return,
+                line.qty_in_transit,
                 precision_rounding=line.uom_id.rounding,
             )
             != 0
@@ -603,6 +643,20 @@ class StoreTransferReturn(models.Model):
         # La mercadería permanece en tránsito.
         # ========================================================
         if lines_with_difference:
+
+            # ========================================================
+            # PROPONER LA CANTIDAD CONTADA COMO CORRECCIÓN
+            #
+            # Cuando el destino detecta una diferencia, la cantidad
+            # contada físicamente se propone automáticamente como
+            # cantidad corregida.
+            #
+            # El almacén origen podrá revisarla y modificarla antes
+            # de ejecutar la corrección.
+            # ========================================================
+            for line in lines_to_receive:
+                line.qty_corrected = line.qty_received
+                line.is_corrected = False
 
             self.write(
                 {
@@ -735,6 +789,338 @@ class StoreTransferReturn(models.Model):
                 "message": (
                     "La devolución fue recibida correctamente "
                     "y la mercadería ingresó al almacén destino."
+                ),
+                "type": "success",
+                "sticky": False,
+                "next": {
+                    "type": "ir.actions.client",
+                    "tag": "reload",
+                },
+            },
+        }
+
+    # ============================================================
+    # CORREGIR DEVOLUCIÓN OBSERVADA
+    #
+    # Permite que el almacén origen de la DEV ajuste la cantidad
+    # que realmente debe continuar en tránsito.
+    #
+    # Ejemplo:
+    #
+    # Enviado originalmente: 2
+    # Destino contó:         1
+    # Cantidad corregida:    1
+    #
+    # Movimiento:
+    # Tránsito -> Origen DEV = 1
+    #
+    # Si la corrección fuera hacia arriba:
+    #
+    # Enviado originalmente: 2
+    # Destino contó:         3
+    # Cantidad corregida:    3
+    #
+    # Movimiento:
+    # Origen DEV -> Tránsito = 1
+    #
+    # La cantidad originalmente enviada NO se modifica.
+    # ============================================================
+    def action_correct_return(self):
+        self.ensure_one()
+
+        # --------------------------------------------------------
+        # VALIDAR ESTADO
+        # --------------------------------------------------------
+        if self.state != "observed":
+            raise UserError(
+                "Solo se pueden corregir devoluciones que estén Observadas."
+            )
+
+        # --------------------------------------------------------
+        # SOLO EL ALMACÉN ORIGEN DE LA DEVOLUCIÓN PUEDE CORREGIR
+        # --------------------------------------------------------
+        if not self.is_source_user:
+            raise UserError("Solo el almacén origen de la devolución puede corregirla.")
+
+        transit_location = self.company_id.internal_transit_location_id
+
+        if not transit_location:
+            raise UserError("No se encontró la ubicación de tránsito de la empresa.")
+
+        # --------------------------------------------------------
+        # TIPO DE OPERACIÓN DEL ALMACÉN ORIGEN
+        # --------------------------------------------------------
+        picking_type = self.env["stock.picking.type"].search(
+            [
+                ("warehouse_id", "=", self.source_warehouse_id.id),
+                ("code", "=", "internal"),
+            ],
+            limit=1,
+        )
+
+        if not picking_type:
+            raise UserError(
+                "No se encontró el tipo de traslado interno "
+                "del almacén origen de la devolución."
+            )
+
+        # ========================================================
+        # PREPARAR AJUSTES
+        #
+        # Dos posibles movimientos:
+        #
+        # 1. Tránsito -> Origen
+        #    Cuando la cantidad corregida es menor.
+        #
+        # 2. Origen -> Tránsito
+        #    Cuando la cantidad corregida es mayor.
+        # ========================================================
+        moves_to_source = []
+        moves_to_transit = []
+
+        Quant = self.env["stock.quant"]
+
+        for line in self.line_ids:
+
+            # Solo trabajamos con productos que fueron enviados.
+            if (
+                float_compare(
+                    line.qty_to_return,
+                    0.0,
+                    precision_rounding=line.uom_id.rounding,
+                )
+                <= 0
+            ):
+                continue
+
+            # ----------------------------------------------------
+            # VALIDAR CANTIDAD CORREGIDA
+            # ----------------------------------------------------
+            if (
+                float_compare(
+                    line.qty_corrected,
+                    0.0,
+                    precision_rounding=line.uom_id.rounding,
+                )
+                < 0
+            ):
+                raise UserError(
+                    "La cantidad corregida de %s no puede ser negativa."
+                    % line.product_id.display_name
+                )
+
+            if (
+                float_compare(
+                    line.qty_corrected,
+                    line.available_return_qty,
+                    precision_rounding=line.uom_id.rounding,
+                )
+                > 0
+            ):
+                raise UserError(
+                    "La cantidad corregida de %s supera la cantidad "
+                    "disponible para devolución." % line.product_id.display_name
+                )
+
+            difference = line.qty_corrected - line.qty_in_transit
+
+            # ----------------------------------------------------
+            # CORRECCIÓN HACIA ABAJO
+            #
+            # Ejemplo:
+            # En tránsito: 2
+            # Corregido:   1
+            # Regresa 1 al almacén origen.
+            # ----------------------------------------------------
+            if (
+                float_compare(
+                    difference,
+                    0.0,
+                    precision_rounding=line.uom_id.rounding,
+                )
+                < 0
+            ):
+
+                qty_to_return_source = abs(difference)
+
+                moves_to_source.append(
+                    (
+                        0,
+                        0,
+                        {
+                            "product_id": line.product_id.id,
+                            "product_uom_qty": qty_to_return_source,
+                            "product_uom": line.uom_id.id,
+                            "location_id": transit_location.id,
+                            "location_dest_id": self.source_location_id.id,
+                        },
+                    )
+                )
+
+            # ----------------------------------------------------
+            # CORRECCIÓN HACIA ARRIBA
+            #
+            # Ejemplo:
+            # En tránsito: 2
+            # Corregido:   3
+            # Sale 1 unidad adicional del almacén origen.
+            # ----------------------------------------------------
+            elif (
+                float_compare(
+                    difference,
+                    0.0,
+                    precision_rounding=line.uom_id.rounding,
+                )
+                > 0
+            ):
+
+                available_qty = Quant._get_available_quantity(
+                    line.product_id,
+                    self.source_location_id,
+                )
+
+                if (
+                    float_compare(
+                        available_qty,
+                        difference,
+                        precision_rounding=line.uom_id.rounding,
+                    )
+                    < 0
+                ):
+                    raise UserError(
+                        "Stock insuficiente para corregir %s.\n\n"
+                        "Disponible: %.2f\n"
+                        "Cantidad adicional necesaria: %.2f"
+                        % (
+                            line.product_id.display_name,
+                            available_qty,
+                            difference,
+                        )
+                    )
+
+                moves_to_transit.append(
+                    (
+                        0,
+                        0,
+                        {
+                            "product_id": line.product_id.id,
+                            "product_uom_qty": difference,
+                            "product_uom": line.uom_id.id,
+                            "location_id": self.source_location_id.id,
+                            "location_dest_id": transit_location.id,
+                        },
+                    )
+                )
+
+        correction_pickings = self.env["stock.picking"]
+
+        # ========================================================
+        # MOVIMIENTO: TRÁNSITO -> ORIGEN DEV
+        # ========================================================
+        if moves_to_source:
+
+            picking_return = self.env["stock.picking"].create(
+                {
+                    "is_store_transfer_technical": True,
+                    "store_transfer_id": self.original_transfer_id.id,
+                    "picking_type_id": picking_type.id,
+                    "location_id": transit_location.id,
+                    "location_dest_id": self.source_location_id.id,
+                    "origin": "%s - Corrección" % self.name,
+                    "move_ids": moves_to_source,
+                }
+            )
+
+            picking_return.action_confirm()
+            picking_return.action_assign()
+
+            for move in picking_return.move_ids:
+                move.quantity = move.product_uom_qty
+
+            result = picking_return.button_validate()
+
+            if result is not True:
+                raise UserError(
+                    "Odoo requiere una validación adicional para "
+                    "completar la corrección de la devolución."
+                )
+
+            correction_pickings |= picking_return
+
+        # ========================================================
+        # MOVIMIENTO: ORIGEN DEV -> TRÁNSITO
+        # ========================================================
+        if moves_to_transit:
+
+            picking_extra = self.env["stock.picking"].create(
+                {
+                    "is_store_transfer_technical": True,
+                    "store_transfer_id": self.original_transfer_id.id,
+                    "picking_type_id": picking_type.id,
+                    "location_id": self.source_location_id.id,
+                    "location_dest_id": transit_location.id,
+                    "origin": "%s - Corrección" % self.name,
+                    "move_ids": moves_to_transit,
+                }
+            )
+
+            picking_extra.action_confirm()
+            picking_extra.action_assign()
+
+            for move in picking_extra.move_ids:
+                move.quantity = move.product_uom_qty
+
+            result = picking_extra.button_validate()
+
+            if result is not True:
+                raise UserError(
+                    "Odoo requiere una validación adicional para "
+                    "completar la corrección de la devolución."
+                )
+
+            correction_pickings |= picking_extra
+
+        # ========================================================
+        # ACTUALIZAR CANTIDAD REAL EN TRÁNSITO
+        # ========================================================
+        for line in self.line_ids:
+
+            if (
+                float_compare(
+                    line.qty_to_return,
+                    0.0,
+                    precision_rounding=line.uom_id.rounding,
+                )
+                > 0
+            ):
+
+                line.qty_in_transit = line.qty_corrected
+                line.is_corrected = True
+
+        # ========================================================
+        # GUARDAR AUDITORÍA Y VOLVER A "POR RECIBIR"
+        # ========================================================
+        values = {
+            "state": "waiting",
+            "corrected_by_id": self.env.user.id,
+            "corrected_date": fields.Datetime.now(),
+        }
+
+        if correction_pickings:
+            values["correction_picking_ids"] = [
+                fields.Command.link(picking.id) for picking in correction_pickings
+            ]
+
+        self.write(values)
+
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Devolución corregida",
+                "message": (
+                    "La cantidad en tránsito fue ajustada. "
+                    "La devolución quedó nuevamente pendiente de recepción."
                 ),
                 "type": "success",
                 "sticky": False,
@@ -884,6 +1270,80 @@ class StoreTransferReturnLine(models.Model):
         string="Cantidad recibida",
         copy=False,
     )
+
+    # ============================================================
+    # DIFERENCIA DE LA DEVOLUCIÓN
+    #
+    # Compara lo que el almacén origen declaró como devolución
+    # contra lo que el almacén destino contó físicamente.
+    #
+    # Ejemplo:
+    # Cantidad enviada:  2
+    # Cantidad recibida: 1
+    # Diferencia:       -1
+    # ============================================================
+
+    difference_qty = fields.Float(
+        string="Diferencia",
+        compute="_compute_difference",
+    )
+
+    has_difference = fields.Boolean(
+        string="Tiene diferencia",
+        compute="_compute_difference",
+    )
+
+    # ============================================================
+    # CANTIDAD CORREGIDA
+    #
+    # Se utilizará únicamente cuando una DEV haya sido observada.
+    #
+    # Ejemplo:
+    # Enviado originalmente: 2
+    # Recibido físicamente:  1
+    # Cantidad corregida:    1
+    #
+    # La cantidad original enviada NO se modifica para conservar
+    # el historial de la devolución.
+    # ============================================================
+
+    qty_corrected = fields.Float(
+        string="Cantidad corregida",
+        copy=False,
+    )
+
+    is_corrected = fields.Boolean(
+        string="Corrección realizada",
+        default=False,
+        readonly=True,
+        copy=False,
+    )
+
+    @api.depends(
+        "qty_to_return",
+        "qty_received",
+        "return_id.state",
+    )
+    def _compute_difference(self):
+        for line in self:
+
+            # Mientras esté en Borrador todavía no existe
+            # una recepción contra la cual comparar.
+            if line.return_id.state == "draft":
+                line.difference_qty = 0.0
+                line.has_difference = False
+                continue
+
+            line.difference_qty = line.qty_received - line.qty_to_return
+
+            line.has_difference = (
+                float_compare(
+                    line.qty_received,
+                    line.qty_to_return,
+                    precision_rounding=line.uom_id.rounding,
+                )
+                != 0
+            )
 
     @api.constrains("qty_to_return")
     def _check_qty_to_return(self):

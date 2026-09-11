@@ -97,6 +97,23 @@
                             class="oe_highlight"
                             invisible="state != 'waiting' or not is_destination_user"/>
 
+                    <!-- ============================================================
+                        CORREGIR DEVOLUCIÓN OBSERVADA
+
+                        Solo aparece:
+                        - cuando la DEV está Observada;
+                        - al almacén que originó la devolución.
+
+                        Al confirmar la corrección se ajusta físicamente la
+                        cantidad que permanece en tránsito y la DEV vuelve
+                        al estado "Por recibir".
+                        ============================================================ -->
+                    <button name="action_correct_return"
+                            string="Corregir devolución"
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'observed' or not is_source_user"/>
+
                     <field name="state"
                            widget="statusbar"
                            statusbar_visible="draft,waiting,observed,received,cancelled"/>
@@ -181,35 +198,122 @@
                             </field>
 
 
-                            <!-- ==================================================
-                                 PRODUCTOS DESPUÉS DEL ENVÍO
+                            <!-- ============================================================
+                                DEVOLUCIÓN EN ESTADO "POR RECIBIR"
 
-                                 La cantidad enviada queda bloqueada.
-                                 El almacén destino solamente registra cuánto
-                                 recibió mientras la DEV esté "Por recibir".
-                                 ================================================== -->
+                                El usuario destino solo necesita saber:
+                                - qué producto llegará;
+                                - cuánto debe recibir;
+                                - cuánto contó físicamente.
+
+                                No mostramos aquí la cantidad original histórica.
+                                ============================================================ -->
                             <field name="line_ids"
-                                   invisible="state == 'draft'">
+                                invisible="state != 'waiting'">
 
                                 <list editable="bottom"
-                                      create="0"
-                                      delete="0">
+                                    create="0"
+                                    delete="0">
 
                                     <field name="product_id"
-                                           string="Producto"
-                                           readonly="1"/>
+                                        string="Producto"
+                                        readonly="1"/>
 
-                                    <field name="qty_to_return"
-                                           string="Cantidad enviada"
-                                           readonly="1"/>
+                                    <!-- Cantidad que realmente permanece pendiente en tránsito -->
+                                    <field name="qty_in_transit"
+                                        string="Cantidad esperada"
+                                        readonly="1"/>
+
+                                    <!-- Solo el almacén destino registra lo recibido -->
+                                    <field name="qty_received"
+                                        string="Cantidad recibida"
+                                        readonly="not parent.is_destination_user"/>
 
                                     <field name="uom_id"
-                                           string="Unidad"
-                                           readonly="1"/>
+                                        string="Unidad"
+                                        readonly="1"/>
+
+                                </list>
+
+                            </field>
+
+
+                            <!-- ============================================================
+                                DEVOLUCIÓN OBSERVADA
+
+                                Aquí sí mostramos la diferencia porque existe un problema
+                                que todavía debe ser corregido.
+
+                                El almacén origen únicamente modifica "Cantidad corregida".
+                                ============================================================ -->
+                            <field name="line_ids"
+                                invisible="state != 'observed'">
+
+                                <list editable="bottom"
+                                    create="0"
+                                    delete="0"
+                                    decoration-danger="has_difference">
+
+                                    <field name="product_id"
+                                        string="Producto"
+                                        readonly="1"/>
+
+                                    <field name="qty_in_transit"
+                                        string="Cantidad esperada"
+                                        readonly="1"/>
 
                                     <field name="qty_received"
-                                           string="Cantidad recibida"
-                                           readonly="parent.state != 'waiting' or not parent.is_destination_user"/>
+                                        string="Cantidad recibida"
+                                        readonly="1"/>
+
+                                    <field name="difference_qty"
+                                        string="Diferencia"
+                                        readonly="1"/>
+
+                                    <!-- Campo técnico para resaltar la línea observada -->
+                                    <field name="has_difference"
+                                        column_invisible="1"/>
+
+                                    <!-- Solo el origen de la DEV puede corregir -->
+                                    <field name="qty_corrected"
+                                        string="Corregir a"
+                                        readonly="not parent.is_source_user"/>
+
+                                    <field name="uom_id"
+                                        string="Unidad"
+                                        readonly="1"/>
+
+                                </list>
+
+                            </field>
+
+
+                            <!-- ============================================================
+                                DEVOLUCIÓN RECIBIDA
+
+                                Una vez terminado el proceso mostramos únicamente el
+                                resultado final para evitar confundir al personal de tienda.
+
+                                El historial original y las correcciones siguen almacenados
+                                internamente para auditoría.
+                                ============================================================ -->
+                            <field name="line_ids"
+                                invisible="state != 'received'">
+
+                                <list create="0"
+                                    delete="0">
+
+                                    <field name="product_id"
+                                        string="Producto"
+                                        readonly="1"/>
+
+                                    <field name="qty_received"
+                                        string="Cantidad recibida"
+                                        readonly="1"/>
+
+                                    <field name="uom_id"
+                                        string="Unidad"
+                                        readonly="1"/>
 
                                 </list>
 
