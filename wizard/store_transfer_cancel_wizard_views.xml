@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- ============================================================
+         ASISTENTE PARA ANULAR UNA TRANSFERENCIA TRF
+
+         Solicita un motivo obligatorio antes de realizar la
+         anulación. El movimiento de stock no se realiza aquí;
+         lo procesa dt.store.transfer desde Python.
+         ============================================================ -->
+
+    <record id="view_store_transfer_cancel_wizard_form"
+            model="ir.ui.view">
+
+        <field name="name">dt.store.transfer.cancel.wizard.form</field>
+        <field name="model">dt.store.transfer.cancel.wizard</field>
+
+        <field name="arch" type="xml">
+
+            <form string="Anular transferencia">
+
+                <group>
+                    <field name="transfer_id"/>
+
+                    <field name="reason"
+                           placeholder="Indique por qué se está anulando esta transferencia..."/>
+                </group>
+
+                <footer>
+
+                    <!-- Ejecuta la anulación -->
+                    <button name="action_confirm_cancel"
+                            string="Confirmar anulación"
+                            type="object"
+                            class="btn-danger"/>
+
+                    <!-- Cierra el asistente sin realizar cambios -->
+                    <button string="Cancelar"
+                            special="cancel"
+                            class="btn-secondary"/>
+
+                </footer>
+
+            </form>
+
+        </field>
+
+    </record>
+
+</odoo>

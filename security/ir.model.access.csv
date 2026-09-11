@@ -1,3 +1,4 @@
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_dt_store_transfer_tienda,Transferencias entre tiendas,model_dt_store_transfer,pos_stock_restriccion_tienda.group_tienda_restringida,1,1,1,0
 access_dt_store_transfer_line_tienda,Detalle transferencias entre tiendas,model_dt_store_transfer_line,pos_stock_restriccion_tienda.group_tienda_restringida,1,1,1,0
+access_dt_store_transfer_cancel_wizard,Asistente anular transferencia,model_dt_store_transfer_cancel_wizard,pos_stock_restriccion_tienda.group_tienda_restringida,1,1,1,1

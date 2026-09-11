@@ -9,7 +9,8 @@
         <field name="name">dt.store.transfer.list</field>
         <field name="model">dt.store.transfer</field>
         <field name="arch" type="xml">
-            <list string="Transferencias entre Tiendas">
+            <list string="Transferencias entre Tiendas"
+                    decoration-muted="state == 'cancelled'">
                 <field name="name"/>
                 <!--Origen y destino visible para las tiendas -->
                 <field name="source_location_id"/>
@@ -70,14 +71,34 @@
                             string="Confirmar corrección"
                             type="object"
                             class="oe_highlight"
-                            invisible="state != 'observed' or not is_source_user"/>        
+                            invisible="state != 'observed' or not is_source_user"/>
+
+                    <!-- ============================================================
+                        ANULAR TRANSFERENCIA
+
+                        Solo el almacén origen puede anular.
+
+                        Permitido en:
+                        - Borrador
+                        - Por recibir
+                        - Observada
+
+                        No aparece cuando ya está:
+                        - Recibida
+                        - Anulada
+                        ============================================================ -->
+                    <button name="action_open_cancel_wizard"
+                            string="Anular transferencia"
+                            type="object"
+                            class="btn-secondary"
+                            invisible="state not in ('waiting', 'observed') or not is_source_user"/>
 
                     <!-- ============================================================
                         ESTADO DEL TRASLADO
                         ============================================================ -->
                     <field name="state"
-                        widget="statusbar"
-                        statusbar_visible="draft,waiting,observed,received"/>
+                            widget="statusbar"
+                            statusbar_visible="draft,waiting,observed,received,cancelled"/>
 
                 </header>
 

@@ -11,6 +11,7 @@
         "security/security_groups.xml",
         # Permisos de acceso del nuevo modelo de transferencias
         "security/ir.model.access.csv",
+        "wizard/store_transfer_cancel_wizard_views.xml",
         "security/security_rules.xml",
         # numero automatico de transferencias entre tiendas
         "data/store_transfer_sequence.xml",

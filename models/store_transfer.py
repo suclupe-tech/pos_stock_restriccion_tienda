@@ -145,6 +145,7 @@ class StoreTransfer(models.Model):
             ("waiting", "Por recibir"),
             ("observed", "Observada"),
             ("received", "Recibida"),
+            ("cancelled", "Anulada"),
         ],
         string="Estado",
         default="draft",
@@ -269,6 +270,41 @@ class StoreTransfer(models.Model):
     correction_picking_ids = fields.Many2many(
         "stock.picking",
         string="Movimientos de corrección",
+        readonly=True,
+        copy=False,
+    )
+
+    # ============================================================
+    # AUDITORÍA DE ANULACIÓN
+    #
+    # Conserva el motivo, usuario y fecha de anulación.
+    # Si la transferencia ya había salido del almacén, también
+    # guardaremos el movimiento técnico utilizado para devolver
+    # la mercadería en tránsito al almacén origen.
+    # ============================================================
+
+    cancel_reason = fields.Text(
+        string="Motivo de anulación",
+        readonly=True,
+        copy=False,
+    )
+
+    cancelled_by_id = fields.Many2one(
+        "res.users",
+        string="Anulado por",
+        readonly=True,
+        copy=False,
+    )
+
+    cancelled_date = fields.Datetime(
+        string="Fecha de anulación",
+        readonly=True,
+        copy=False,
+    )
+
+    cancellation_picking_id = fields.Many2one(
+        "stock.picking",
+        string="Movimiento de anulación",
         readonly=True,
         copy=False,
     )
@@ -971,6 +1007,235 @@ class StoreTransfer(models.Model):
                 "message": (
                     "La diferencia fue corregida y la transferencia "
                     "volvió a quedar pendiente de recepción."
+                ),
+                "type": "success",
+                "sticky": False,
+                "next": {
+                    "type": "ir.actions.client",
+                    "tag": "reload",
+                },
+            },
+        }
+
+    # ============================================================
+    # ABRIR ASISTENTE DE ANULACIÓN
+    #
+    # Muestra una ventana emergente para que el usuario indique
+    # obligatoriamente el motivo antes de anular el TRF.
+    # ============================================================
+    def action_open_cancel_wizard(self):
+        self.ensure_one()
+
+        # Una transferencia recibida ya no se anula.
+        # En ese caso deberá utilizarse el flujo de devolución.
+        if self.state == "received":
+            raise UserError(
+                "Una transferencia recibida no puede anularse. "
+                "Debe realizarse una devolución."
+            )
+
+        if self.state == "cancelled":
+            raise UserError(
+                "Esta transferencia ya se encuentra anulada."
+            )
+
+        # Solo el almacén origen puede iniciar la anulación.
+        if not self.is_source_user:
+            raise UserError(
+                "Solo el almacén de origen puede anular esta transferencia."
+            )
+
+        return {
+            "type": "ir.actions.act_window",
+            "name": "Anular transferencia",
+            "res_model": "dt.store.transfer.cancel.wizard",
+            "view_mode": "form",
+            "target": "new",
+            "context": {
+                "default_transfer_id": self.id,
+            },
+        }
+
+    # ============================================================
+    # ANULAR TRANSFERENCIA
+    #
+    # Este método realiza la anulación real del documento.
+    #
+    # - Borrador:
+    #   No existe movimiento de stock, por lo que solamente cambia
+    #   el documento al estado "Anulada".
+    #
+    # - Por recibir / Observada:
+    #   La mercadería que continúa en tránsito se devuelve
+    #   automáticamente al almacén origen.
+    #
+    # - Recibida:
+    #   No se puede anular porque el stock ya ingresó al destino.
+    #   Ese caso se manejará posteriormente mediante devolución.
+    #
+    # El motivo será enviado desde el asistente de anulación.
+    # ============================================================
+    def action_cancel_with_reason(self, reason):
+        self.ensure_one()
+
+        # --------------------------------------------------------
+        # VALIDAR MOTIVO
+        # --------------------------------------------------------
+        reason = (reason or "").strip()
+
+        if not reason:
+            raise UserError("Debe ingresar el motivo de la anulación.")
+
+        # --------------------------------------------------------
+        # VALIDAR ESTADO
+        # --------------------------------------------------------
+        if self.state == "cancelled":
+            raise UserError("Esta transferencia ya se encuentra anulada.")
+
+        if self.state == "received":
+            raise UserError(
+                "Una transferencia recibida no puede anularse. "
+                "Debe realizarse una devolución."
+            )
+
+        if self.state not in ("draft", "waiting", "observed"):
+            raise UserError(
+                "La transferencia no se encuentra en un estado que permita anularla."
+            )
+
+        # --------------------------------------------------------
+        # VALIDAR USUARIO
+        #
+        # La anulación corresponde al almacén que originó el envío.
+        # --------------------------------------------------------
+        if not self.is_source_user:
+            raise UserError(
+                "Solo el almacén de origen puede anular esta transferencia."
+            )
+
+        cancellation_picking = False
+
+        # ========================================================
+        # SI YA FUE ENVIADA:
+        # DEVOLVER TODO LO QUE CONTINÚE EN TRÁNSITO
+        # ========================================================
+        if self.state in ("waiting", "observed"):
+
+            transit_location = self.company_id.internal_transit_location_id
+
+            if not transit_location:
+                raise UserError(
+                    "No se encontró la ubicación de tránsito de la empresa."
+                )
+
+            picking_type = self.env["stock.picking.type"].search(
+                [
+                    ("warehouse_id", "=", self.source_warehouse_id.id),
+                    ("code", "=", "internal"),
+                ],
+                limit=1,
+            )
+
+            if not picking_type:
+                raise UserError(
+                    "No se encontró el tipo de traslado interno "
+                    "del almacén origen."
+                )
+
+            # ----------------------------------------------------
+            # Preparar únicamente las cantidades que realmente
+            # continúan técnicamente en tránsito.
+            # ----------------------------------------------------
+            move_values = []
+
+            for line in self.line_ids:
+
+                if float_compare(
+                    line.qty_in_transit,
+                    0.0,
+                    precision_rounding=line.uom_id.rounding,
+                ) <= 0:
+                    continue
+
+                move_values.append(
+                    (
+                        0,
+                        0,
+                        {
+                            "product_id": line.product_id.id,
+                            "product_uom_qty": line.qty_in_transit,
+                            "product_uom": line.uom_id.id,
+                            "location_id": transit_location.id,
+                            "location_dest_id": self.source_location_id.id,
+                        },
+                    )
+                )
+
+            # ----------------------------------------------------
+            # Crear un único movimiento técnico de devolución.
+            # ----------------------------------------------------
+            if move_values:
+
+                cancellation_picking = self.env["stock.picking"].create(
+                    {
+                        # Identificarlo como movimiento técnico TRF.
+                        "is_store_transfer_technical": True,
+                        "store_transfer_id": self.id,
+
+                        "picking_type_id": picking_type.id,
+                        "location_id": transit_location.id,
+                        "location_dest_id": self.source_location_id.id,
+                        "origin": "%s - Anulación" % self.name,
+                        "move_ids": move_values,
+                    }
+                )
+
+                cancellation_picking.action_confirm()
+                cancellation_picking.action_assign()
+
+                for move in cancellation_picking.move_ids:
+                    move.quantity = move.product_uom_qty
+
+                result = cancellation_picking.button_validate()
+
+                if result is not True:
+                    raise UserError(
+                        "Odoo requiere una validación adicional para "
+                        "completar la devolución por anulación."
+                    )
+
+            # ----------------------------------------------------
+            # Ya no queda mercadería de este TRF en tránsito.
+            # ----------------------------------------------------
+            for line in self.line_ids:
+                line.qty_in_transit = 0.0
+
+        # ========================================================
+        # REGISTRAR LA ANULACIÓN
+        # ========================================================
+        self.write(
+            {
+                "state": "cancelled",
+                "cancel_reason": reason,
+                "cancelled_by_id": self.env.user.id,
+                "cancelled_date": fields.Datetime.now(),
+                "cancellation_picking_id": (
+                    cancellation_picking.id
+                    if cancellation_picking
+                    else False
+                ),
+            }
+        )
+
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Transferencia anulada",
+                "message": (
+                    "La transferencia fue anulada correctamente. "
+                    "La mercadería en tránsito fue devuelta al almacén "
+                    "de origen cuando correspondía."
                 ),
                 "type": "success",
                 "sticky": False,
