@@ -197,6 +197,39 @@ class StoreTransferReturn(models.Model):
     )
 
     # ============================================================
+    # AUDITORÍA DE ANULACIÓN DE DEVOLUCIÓN
+    #
+    # Conserva el motivo, usuario, fecha y movimiento técnico
+    # generado cuando una DEV es anulada.
+    # ============================================================
+
+    cancel_reason = fields.Text(
+        string="Motivo de anulación",
+        readonly=True,
+        copy=False,
+    )
+
+    cancelled_by_id = fields.Many2one(
+        "res.users",
+        string="Anulado por",
+        readonly=True,
+        copy=False,
+    )
+
+    cancelled_date = fields.Datetime(
+        string="Fecha de anulación",
+        readonly=True,
+        copy=False,
+    )
+
+    cancellation_picking_id = fields.Many2one(
+        "stock.picking",
+        string="Movimiento de anulación",
+        readonly=True,
+        copy=False,
+    )
+
+    # ============================================================
     # MOVIMIENTOS TÉCNICOS DE INVENTARIO
     # ============================================================
 
@@ -331,6 +364,258 @@ class StoreTransferReturn(models.Model):
                         "transferencias que estén en estado Recibida."
                     )
                 )
+
+    # ============================================================
+    # ABRIR ASISTENTE DE ANULACIÓN
+    #
+    # Reutiliza el mismo wizard utilizado por las transferencias
+    # TRF, pero en este caso carga automáticamente la DEV.
+    # ============================================================
+
+    def action_open_cancel_wizard(self):
+        self.ensure_one()
+
+        if self.state not in ("waiting", "observed"):
+            raise UserError(
+                "Solo se pueden anular devoluciones que estén "
+                "Por recibir u Observadas."
+            )
+
+        if not self.is_source_user:
+            raise UserError("Solo el almacén origen de la devolución puede anularla.")
+
+        return {
+            "type": "ir.actions.act_window",
+            "name": "Anular devolución",
+            "res_model": "dt.store.transfer.cancel.wizard",
+            "view_mode": "form",
+            "target": "new",
+            "context": {
+                "default_return_id": self.id,
+                "default_transfer_id": False,
+            },
+        }
+
+    # ============================================================
+    # ANULAR DEVOLUCIÓN CON MOTIVO
+    #
+    # Devuelve al almacén origen de la DEV toda la mercadería que
+    # todavía permanezca físicamente en tránsito.
+    #
+    # Se permite únicamente cuando la devolución está:
+    # - Por recibir
+    # - Observada
+    #
+    # Una DEV ya Recibida no puede anularse porque la mercadería
+    # ya ingresó al almacén destino.
+    # ============================================================
+    def action_cancel_with_reason(self, reason):
+        self.ensure_one()
+
+        # --------------------------------------------------------
+        # VALIDAR MOTIVO
+        # --------------------------------------------------------
+        reason = (reason or "").strip()
+
+        if not reason:
+            raise UserError("Debe ingresar el motivo de la anulación.")
+
+        # --------------------------------------------------------
+        # VALIDAR ESTADO
+        # --------------------------------------------------------
+        if self.state not in ("waiting", "observed"):
+            raise UserError(
+                "Solo se pueden anular devoluciones que estén "
+                "Por recibir u Observadas."
+            )
+
+        # --------------------------------------------------------
+        # SOLO EL ORIGEN DE LA DEVOLUCIÓN PUEDE ANULAR
+        # --------------------------------------------------------
+        if not self.is_source_user:
+            raise UserError("Solo el almacén origen de la devolución puede anularla.")
+
+        # ========================================================
+        # UBICACIÓN DE TRÁNSITO
+        # ========================================================
+        transit_location = self.company_id.internal_transit_location_id
+
+        if not transit_location:
+            raise UserError("No se encontró la ubicación de tránsito de la empresa.")
+
+        # ========================================================
+        # PRODUCTOS QUE TODAVÍA ESTÁN EN TRÁNSITO
+        #
+        # Utilizamos qty_in_transit porque puede ser diferente de
+        # la cantidad enviada originalmente si previamente hubo
+        # una corrección.
+        # ========================================================
+        lines_in_transit = self.line_ids.filtered(
+            lambda line: float_compare(
+                line.qty_in_transit,
+                0.0,
+                precision_rounding=line.uom_id.rounding,
+            )
+            > 0
+        )
+
+        cancellation_picking = False
+
+        # ========================================================
+        # DEVOLVER STOCK: TRÁNSITO -> ORIGEN DEV
+        # ========================================================
+        if lines_in_transit:
+
+            picking_type = self.env["stock.picking.type"].search(
+                [
+                    ("warehouse_id", "=", self.source_warehouse_id.id),
+                    ("code", "=", "internal"),
+                ],
+                limit=1,
+            )
+
+            if not picking_type:
+                raise UserError(
+                    "No se encontró el tipo de traslado interno "
+                    "del almacén origen de la devolución."
+                )
+
+            # ----------------------------------------------------
+            # VALIDAR QUE EL STOCK REALMENTE EXISTA EN TRÁNSITO
+            #
+            # Se agrupan cantidades del mismo producto para evitar
+            # inconsistencias si hubiese varias líneas.
+            # ----------------------------------------------------
+            quantities_by_product = {}
+
+            for line in lines_in_transit:
+                quantities_by_product.setdefault(
+                    line.product_id,
+                    0.0,
+                )
+                quantities_by_product[line.product_id] += line.qty_in_transit
+
+            Quant = self.env["stock.quant"]
+
+            for product, requested_qty in quantities_by_product.items():
+
+                available_qty = Quant._get_available_quantity(
+                    product,
+                    transit_location,
+                )
+
+                if (
+                    float_compare(
+                        available_qty,
+                        requested_qty,
+                        precision_rounding=product.uom_id.rounding,
+                    )
+                    < 0
+                ):
+                    raise UserError(
+                        "No existe suficiente stock en tránsito para "
+                        "anular la devolución de %s.\n\n"
+                        "En tránsito disponible: %.2f\n"
+                        "Cantidad requerida: %.2f"
+                        % (
+                            product.display_name,
+                            available_qty,
+                            requested_qty,
+                        )
+                    )
+
+            # ----------------------------------------------------
+            # PREPARAR MOVIMIENTOS
+            # ----------------------------------------------------
+            move_values = []
+
+            for line in lines_in_transit:
+
+                move_values.append(
+                    (
+                        0,
+                        0,
+                        {
+                            "product_id": line.product_id.id,
+                            "product_uom_qty": line.qty_in_transit,
+                            "product_uom": line.uom_id.id,
+                            "location_id": transit_location.id,
+                            "location_dest_id": self.source_location_id.id,
+                        },
+                    )
+                )
+
+            # ----------------------------------------------------
+            # CREAR MOVIMIENTO TÉCNICO DE ANULACIÓN
+            # ----------------------------------------------------
+            cancellation_picking = self.env["stock.picking"].create(
+                {
+                    "is_store_transfer_technical": True,
+                    "store_transfer_id": self.original_transfer_id.id,
+                    "picking_type_id": picking_type.id,
+                    "location_id": transit_location.id,
+                    "location_dest_id": self.source_location_id.id,
+                    "origin": "%s - Anulación" % self.name,
+                    "move_ids": move_values,
+                }
+            )
+
+            cancellation_picking.action_confirm()
+            cancellation_picking.action_assign()
+
+            for move in cancellation_picking.move_ids:
+                move.quantity = move.product_uom_qty
+
+            result = cancellation_picking.button_validate()
+
+            if result is not True:
+                raise UserError(
+                    "Odoo requiere una validación adicional para "
+                    "completar la anulación de la devolución."
+                )
+
+            # ========================================================
+            # GUARDAR LA CANTIDAD REALMENTE ANULADA
+            #
+            # Primero conservamos cuánto regresó al almacén origen
+            # y después dejamos el tránsito de la DEV en cero.
+            # ========================================================
+            for line in lines_in_transit:
+                line.qty_cancelled = line.qty_in_transit
+                line.qty_in_transit = 0.0
+
+        # ========================================================
+        # FINALIZAR ANULACIÓN Y GUARDAR AUDITORÍA
+        # ========================================================
+        self.write(
+            {
+                "state": "cancelled",
+                "cancel_reason": reason,
+                "cancelled_by_id": self.env.user.id,
+                "cancelled_date": fields.Datetime.now(),
+                "cancellation_picking_id": (
+                    cancellation_picking.id if cancellation_picking else False
+                ),
+            }
+        )
+
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Devolución anulada",
+                "message": (
+                    "La devolución fue anulada correctamente. "
+                    "La mercadería pendiente regresó al almacén origen."
+                ),
+                "type": "success",
+                "sticky": False,
+                "next": {
+                    "type": "ir.actions.client",
+                    "tag": "reload",
+                },
+            },
+        }
 
     # ============================================================
     # ENVIAR DEVOLUCIÓN
@@ -1260,6 +1545,21 @@ class StoreTransferReturnLine(models.Model):
 
     qty_in_transit = fields.Float(
         string="Cantidad en tránsito",
+        readonly=True,
+        copy=False,
+    )
+
+    # ============================================================
+    # CANTIDAD ANULADA
+    #
+    # Guarda cuánto stock regresó realmente desde tránsito hacia
+    # el almacén origen cuando se anuló la DEV.
+    #
+    # Se conserva aunque qty_in_transit posteriormente quede en 0.
+    # ============================================================
+
+    qty_cancelled = fields.Float(
+        string="Cantidad anulada",
         readonly=True,
         copy=False,
     )

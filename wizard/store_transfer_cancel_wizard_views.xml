@@ -1,12 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
+
 <odoo>
 
     <!-- ============================================================
-         ASISTENTE PARA ANULAR UNA TRANSFERENCIA TRF
+         ASISTENTE DE ANULACIÓN
 
-         Solicita un motivo obligatorio antes de realizar la
-         anulación. El movimiento de stock no se realiza aquí;
-         lo procesa dt.store.transfer desde Python.
+         Este mismo asistente sirve para:
+         - Transferencias TRF/xxxxx
+         - Devoluciones DEV/xxxxx
+
+         Solo mostrará el documento que corresponda.
+         El movimiento de stock se procesa desde Python.
          ============================================================ -->
 
     <record id="view_store_transfer_cancel_wizard_form"
@@ -17,24 +21,43 @@
 
         <field name="arch" type="xml">
 
-            <form string="Anular transferencia">
+            <form string="Anular documento">
 
                 <group>
-                    <field name="transfer_id"/>
 
+                    <!-- ==================================================
+                         TRANSFERENCIA TRF
+
+                         Solo se muestra cuando el asistente fue abierto
+                         desde una transferencia TRF.
+                         ================================================== -->
+                    <field name="transfer_id"
+                           invisible="not transfer_id"/>
+
+                    <!-- ==================================================
+                         DEVOLUCIÓN DEV
+
+                         Solo se muestra cuando el asistente fue abierto
+                         desde una devolución DEV.
+                         ================================================== -->
+                    <field name="return_id"
+                           invisible="not return_id"/>
+
+                    <!-- Motivo obligatorio para conservar trazabilidad -->
                     <field name="reason"
-                           placeholder="Indique por qué se está anulando esta transferencia..."/>
+                           placeholder="Indique el motivo de la anulación..."/>
+
                 </group>
 
                 <footer>
 
-                    <!-- Ejecuta la anulación -->
+                    <!-- Ejecuta la anulación del TRF o DEV correspondiente -->
                     <button name="action_confirm_cancel"
                             string="Confirmar anulación"
                             type="object"
                             class="btn-danger"/>
 
-                    <!-- Cierra el asistente sin realizar cambios -->
+                    <!-- Cierra sin realizar ningún cambio -->
                     <button string="Cancelar"
                             special="cancel"
                             class="btn-secondary"/>

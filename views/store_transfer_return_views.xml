@@ -47,14 +47,14 @@
         <field name="arch" type="xml">
 
             <form string="Devolución de Mercadería">
-                
+
                 <!-- ============================================================
                      CAMPOS TÉCNICOS DE ROL
                      Se utilizan para controlar qué usuario puede enviar
                      o recibir la devolución.
                      ============================================================ -->
                 <field name="is_source_user" invisible="1"/>
-                <field name="is_destination_user" invisible="1"/>                
+                <field name="is_destination_user" invisible="1"/>
 
                 <header>
 
@@ -114,6 +114,22 @@
                             class="oe_highlight"
                             invisible="state != 'observed' or not is_source_user"/>
 
+                    <!-- ============================================================
+                        ANULAR DEVOLUCIÓN
+
+                        Solo aparece:
+                        - cuando la DEV está Por recibir u Observada;
+                        - al almacén que originó la devolución.
+
+                        Al confirmar desde el asistente, todo lo que todavía
+                        permanezca en tránsito regresará al almacén origen.
+                        ============================================================ -->
+                    <button name="action_open_cancel_wizard"
+                            string="Anular devolución"
+                            type="object"
+                            class="btn-danger"
+                            invisible="state not in ('waiting', 'observed') or not is_source_user"/>
+
                     <field name="state"
                            widget="statusbar"
                            statusbar_visible="draft,waiting,observed,received,cancelled"/>
@@ -142,7 +158,20 @@
 
                         <group>
                             <field name="reason"
-                                   placeholder="Ejemplo: Compostura de prendas"/>
+                                   placeholder="Ejemplo: Compostura de prendas"
+                                   readonly="state != ''draft'"/>
+
+                            <!-- ==================================================
+                                MOTIVO DE ANULACIÓN
+
+                                Solo aparece cuando la DEV fue anulada.
+                                Se mantiene separado del motivo por el cual se
+                                creó originalmente la devolución.
+                                ================================================== -->
+                            <field name="cancel_reason"
+                                string="Motivo de anulación"
+                                readonly="1"
+                                invisible="state != 'cancelled'"/>
                         </group>
 
                     </group>
@@ -309,6 +338,39 @@
 
                                     <field name="qty_received"
                                         string="Cantidad recibida"
+                                        readonly="1"/>
+
+                                    <field name="uom_id"
+                                        string="Unidad"
+                                        readonly="1"/>
+
+                                </list>
+
+                            </field>
+
+                            <!-- ============================================================
+                                DEVOLUCIÓN ANULADA
+
+                                Para tienda mostramos únicamente:
+                                - producto;
+                                - cantidad que realmente regresó al almacén origen;
+                                - unidad.
+
+                                No mostramos diferencias ni cantidades históricas para
+                                evitar confusión.
+                                ============================================================ -->
+                            <field name="line_ids"
+                                invisible="state != 'cancelled'">
+
+                                <list create="0"
+                                    delete="0">
+
+                                    <field name="product_id"
+                                        string="Producto"
+                                        readonly="1"/>
+
+                                    <field name="qty_cancelled"
+                                        string="Cantidad anulada"
                                         readonly="1"/>
 
                                     <field name="uom_id"
