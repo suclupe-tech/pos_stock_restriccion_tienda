@@ -21,6 +21,7 @@
         "views/stock_picking_type_views.xml",
         "views/stock_picking_menu_views.xml",
         "views/store_transfer_views.xml",
+        "views/stock_picking_technical_filter.xml",
     ],
     "installable": True,
     "application": False,

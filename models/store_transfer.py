@@ -399,11 +399,14 @@ class StoreTransfer(models.Model):
                 self.source_location_id,
             )
 
-            if float_compare(
-                available_qty,
-                requested_qty,
-                precision_rounding=product.uom_id.rounding,
-            ) < 0:
+            if (
+                float_compare(
+                    available_qty,
+                    requested_qty,
+                    precision_rounding=product.uom_id.rounding,
+                )
+                < 0
+            ):
                 raise UserError(
                     f"Stock insuficiente para {product.display_name}.\n\n"
                     f"Disponible: {available_qty}\n"
@@ -443,6 +446,13 @@ class StoreTransfer(models.Model):
         # --------------------------------------------------------
         picking = self.env["stock.picking"].create(
             {
+                # ========================================================
+                # MOVIMIENTO TÉCNICO DEL TRF
+                # Permite identificarlo y relacionarlo con el documento
+                # comercial/operativo TRF/xxxxx.
+                # ========================================================
+                "is_store_transfer_technical": True,
+                "store_transfer_id": self.id,
                 "picking_type_id": picking_type.id,
                 "location_id": self.source_location_id.id,
                 "location_dest_id": transit_location.id,
@@ -640,6 +650,12 @@ class StoreTransfer(models.Model):
         # ========================================================
         picking = self.env["stock.picking"].create(
             {
+                # ========================================================
+                # MOVIMIENTO TÉCNICO DEL TRF
+                # Recepción desde tránsito hacia el almacén destino.
+                # ========================================================
+                "is_store_transfer_technical": True,
+                "store_transfer_id": self.id,
                 "picking_type_id": picking_type.id,
                 "location_id": transit_location.id,
                 "location_dest_id": self.destination_location_id.id,
@@ -803,6 +819,12 @@ class StoreTransfer(models.Model):
 
                 picking = self.env["stock.picking"].create(
                     {
+                        # ========================================================
+                        # MOVIMIENTO TÉCNICO DE CORRECCIÓN
+                        # Devuelve la diferencia desde tránsito al almacén origen.
+                        # ========================================================
+                        "is_store_transfer_technical": True,
+                        "store_transfer_id": self.id,
                         "picking_type_id": picking_type.id,
                         "location_id": transit_location.id,
                         "location_dest_id": self.source_location_id.id,
@@ -874,6 +896,12 @@ class StoreTransfer(models.Model):
 
                 picking = self.env["stock.picking"].create(
                     {
+                        # ========================================================
+                        # MOVIMIENTO TÉCNICO DE CORRECCIÓN
+                        # Envía al tránsito la cantidad adicional necesaria.
+                        # ========================================================
+                        "is_store_transfer_technical": True,
+                        "store_transfer_id": self.id,
                         "picking_type_id": picking_type.id,
                         "location_id": self.source_location_id.id,
                         "location_dest_id": transit_location.id,
