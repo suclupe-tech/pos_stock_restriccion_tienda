@@ -159,7 +159,7 @@
                         <group>
                             <field name="reason"
                                    placeholder="Ejemplo: Compostura de prendas"
-                                   readonly="state != ''draft'"/>
+                                   readonly="state != 'draft'"/>
 
                             <!-- ==================================================
                                 MOTIVO DE ANULACIÓN

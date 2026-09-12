@@ -310,11 +310,127 @@ class StoreTransfer(models.Model):
     )
 
     # ============================================================
-    # NÚMERO AUTOMÁTICO DE TRANSFERENCIA
-    # Al crear un documento genera TRF/000001, TRF/000002, etc.
+    # CREACIÓN SEGURA DE TRANSFERENCIAS TRF
+    #
+    # Los usuarios de tienda pueden crear TRF normalmente, pero:
+    # - siempre deben nacer en Borrador;
+    # - el origen debe pertenecer a sus almacenes permitidos;
+    # - el destino debe ser una ubicación permitida;
+    # - no pueden crear directamente estados, auditoría ni
+    #   movimientos técnicos manipulados.
+    #
+    # Administradores/TI mantienen el comportamiento normal.
     # ============================================================
     @api.model_create_multi
     def create(self, vals_list):
+
+        if self._is_restricted_store_user():
+
+            user = self.env.user
+            allowed_warehouses = user.allowed_warehouse_ids or user.warehouse_id
+
+            # Campos que únicamente deben ser generados o modificados
+            # por los procesos internos del módulo.
+            protected_fields = {
+                "source_location_id",
+                "destination_warehouse_id",
+                "sent_by_id",
+                "sent_date",
+                "observed_by_id",
+                "observed_date",
+                "received_by_id",
+                "received_date",
+                "sent_picking_id",
+                "receipt_picking_id",
+                "corrected_by_id",
+                "corrected_date",
+                "correction_picking_ids",
+                "cancel_reason",
+                "cancelled_by_id",
+                "cancelled_date",
+                "cancellation_picking_id",
+            }
+
+            for vals in vals_list:
+
+                # ------------------------------------------------
+                # IMPEDIR CAMPOS TÉCNICOS EN LA CREACIÓN
+                # ------------------------------------------------
+                if set(vals) & protected_fields:
+                    raise UserError(
+                        "No puede establecer datos internos "
+                        "al crear una transferencia."
+                    )
+
+                # ------------------------------------------------
+                # EL DOCUMENTO SIEMPRE DEBE NACER EN BORRADOR
+                # ------------------------------------------------
+                if vals.get("state", "draft") != "draft":
+                    raise UserError(
+                        "Una transferencia nueva debe crearse " "en estado Borrador."
+                    )
+
+                # ------------------------------------------------
+                # LA NUMERACIÓN LA GENERA EL SISTEMA
+                # ------------------------------------------------
+                if vals.get("name") not in (False, None, "Nuevo"):
+                    raise UserError(
+                        "El número de transferencia es generado "
+                        "automáticamente por el sistema."
+                    )
+
+                # ------------------------------------------------
+                # VALIDAR COMPAÑÍA
+                # ------------------------------------------------
+                if vals.get("company_id") and vals["company_id"] != self.env.company.id:
+                    raise UserError(
+                        "No puede crear la transferencia " "para otra compañía."
+                    )
+
+                # ------------------------------------------------
+                # VALIDAR ALMACÉN ORIGEN
+                #
+                # Si no llega en vals utilizamos el almacén que
+                # corresponde por defecto al usuario.
+                # ------------------------------------------------
+                source_warehouse_id = vals.get("source_warehouse_id")
+
+                if not source_warehouse_id:
+                    default_source = self._default_source_warehouse()
+                    source_warehouse_id = default_source.id if default_source else False
+
+                if not source_warehouse_id:
+                    raise UserError("No tiene un almacén de origen configurado.")
+
+                source_warehouse = self.env["stock.warehouse"].browse(
+                    source_warehouse_id
+                )
+
+                if source_warehouse not in allowed_warehouses:
+                    raise UserError(
+                        "No puede crear una transferencia desde "
+                        "un almacén que no tiene permitido."
+                    )
+
+                # ------------------------------------------------
+                # VALIDAR UBICACIÓN DESTINO
+                # ------------------------------------------------
+                destination_location_id = vals.get("destination_location_id")
+
+                if destination_location_id:
+
+                    destination_location = self.env["stock.location"].browse(
+                        destination_location_id
+                    )
+
+                    if destination_location not in user.destination_location_ids:
+                        raise UserError(
+                            "No puede seleccionar esa ubicación " "como destino."
+                        )
+
+        # ========================================================
+        # GENERAR NÚMERO TRF
+        # ========================================================
         for vals in vals_list:
             if vals.get("name", "Nuevo") == "Nuevo":
                 vals["name"] = (
@@ -322,6 +438,158 @@ class StoreTransfer(models.Model):
                 )
 
         return super().create(vals_list)
+
+    # ============================================================
+    # SEGURIDAD DE ESCRITURA DEL DOCUMENTO TRF
+    #
+    # La interfaz ya utiliza readonly/invisible, pero estas reglas
+    # protegen también el modelo desde servidor.
+    #
+    # Un usuario de tienda:
+    # - puede editar datos operativos mientras el TRF está Borrador;
+    # - después del envío no puede alterar el encabezado;
+    # - nunca puede modificar manualmente estado, auditoría ni
+    #   movimientos técnicos.
+    #
+    # Los procesos oficiales del módulo utilizan _write_internal()
+    # para modificar esos campos de forma controlada.
+    # ============================================================
+
+    def _is_restricted_store_user(self):
+        """Indica si debemos aplicar las restricciones de tienda."""
+        user = self.env.user
+
+        return user.has_group(
+            "pos_stock_restriccion_tienda.group_tienda_restringida"
+        ) and not user.has_group("base.group_system")
+
+    def _write_internal(self, vals):
+        """
+        Escritura privada utilizada solamente por los procesos internos
+        del TRF: envío, recepción, corrección y anulación.
+        """
+        return super(StoreTransfer, self).write(vals)
+
+    def write(self, vals):
+
+        # Administradores/TI y usuarios no restringidos mantienen
+        # el comportamiento normal de Odoo.
+        if not self._is_restricted_store_user():
+            return super().write(vals)
+
+        fields_to_write = set(vals)
+
+        # --------------------------------------------------------
+        # CAMPOS QUE NUNCA DEBE CAMBIAR MANUALMENTE UNA TIENDA
+        # --------------------------------------------------------
+        protected_fields = {
+            "name",
+            "company_id",
+            "source_location_id",
+            "destination_warehouse_id",
+            "state",
+            "sent_by_id",
+            "sent_date",
+            "observed_by_id",
+            "observed_date",
+            "received_by_id",
+            "received_date",
+            "sent_picking_id",
+            "receipt_picking_id",
+            "corrected_by_id",
+            "corrected_date",
+            "correction_picking_ids",
+            "cancel_reason",
+            "cancelled_by_id",
+            "cancelled_date",
+            "cancellation_picking_id",
+        }
+
+        forbidden_fields = fields_to_write & protected_fields
+
+        if forbidden_fields:
+            raise UserError(
+                "No puede modificar directamente datos internos " "de la transferencia."
+            )
+
+        # --------------------------------------------------------
+        # CAMPOS EDITABLES MIENTRAS ESTÁ EN BORRADOR
+        # --------------------------------------------------------
+        allowed_draft_fields = {
+            "partner_id",
+            "scheduled_date",
+            "origin_reference",
+            "note",
+            "source_warehouse_id",
+            "destination_location_id",
+            "line_ids",
+        }
+
+        # Después del envío solo permitimos que Odoo procese cambios
+        # en las líneas. La seguridad específica de esas líneas se
+        # implementará en dt.store.transfer.line.
+        allowed_after_send_fields = {
+            "line_ids",
+        }
+
+        user = self.env.user
+        allowed_warehouses = user.allowed_warehouse_ids or user.warehouse_id
+
+        # --------------------------------------------------------
+        # VALIDAR CAMBIO DE ALMACÉN ORIGEN
+        # --------------------------------------------------------
+        if "source_warehouse_id" in vals:
+
+            new_source = self.env["stock.warehouse"].browse(vals["source_warehouse_id"])
+
+            if new_source not in allowed_warehouses:
+                raise UserError(
+                    "No puede seleccionar como origen un almacén "
+                    "que no tiene permitido."
+                )
+
+        # --------------------------------------------------------
+        # VALIDAR UBICACIÓN DESTINO
+        # --------------------------------------------------------
+        if "destination_location_id" in vals:
+
+            new_destination = self.env["stock.location"].browse(
+                vals["destination_location_id"]
+            )
+
+            if new_destination not in user.destination_location_ids:
+                raise UserError("No puede seleccionar esa ubicación como destino.")
+
+        # --------------------------------------------------------
+        # VALIDAR SEGÚN EL ESTADO DE CADA TRF
+        # --------------------------------------------------------
+        for transfer in self:
+
+            if transfer.state == "draft":
+
+                if not transfer.is_source_user:
+                    raise UserError(
+                        "Solo el almacén origen puede modificar " "esta transferencia."
+                    )
+
+                invalid_fields = fields_to_write - allowed_draft_fields
+
+                if invalid_fields:
+                    raise UserError(
+                        "No puede modificar esos datos de la transferencia."
+                    )
+
+            else:
+
+                invalid_fields = fields_to_write - allowed_after_send_fields
+
+                if invalid_fields:
+                    raise UserError(
+                        "La transferencia ya fue enviada y su información "
+                        "general ya no puede modificarse."
+                    )
+
+        return super().write(vals)
 
     # ============================================================
     # ENVIAR MERCADERÍA
@@ -526,13 +794,18 @@ class StoreTransfer(models.Model):
         # registramos cuánto producto quedó físicamente en tránsito.
         # ============================================================
         for line in self.line_ids:
-            line.original_qty_sent = line.qty_sent
-            line.qty_in_transit = line.qty_sent
+            # Guardar internamente la cantidad original y la cantidad en tránsito.
+            line._write_internal(
+                {
+                    "original_qty_sent": line.qty_sent,
+                    "qty_in_transit": line.qty_sent,
+                }
+            )
 
         # --------------------------------------------------------
         # 11. Registrar quién hizo el envío y cambiar el estado.
         # --------------------------------------------------------
-        self.write(
+        self._write_internal(
             {
                 "state": "waiting",
                 "sent_by_id": self.env.user.id,
@@ -602,7 +875,7 @@ class StoreTransfer(models.Model):
         # ========================================================
         if lines_with_difference:
 
-            self.write(
+            self._write_internal(
                 {
                     "state": "observed",
                     "observed_by_id": self.env.user.id,
@@ -724,7 +997,7 @@ class StoreTransfer(models.Model):
         # FINALIZAR RECEPCIÓN
         # El producto ya se encuentra en el almacén destino.
         # ========================================================
-        self.write(
+        self._write_internal(
             {
                 "state": "received",
                 "received_by_id": self.env.user.id,
@@ -974,9 +1247,12 @@ class StoreTransfer(models.Model):
 
                 correction_pickings |= picking
 
-            # La cantidad técnica que queda en tránsito debe
-            # coincidir con la nueva cantidad corregida.
-            line.qty_in_transit = line.qty_sent
+            # Actualizar internamente la cantidad que queda realmente en tránsito.
+            line._write_internal(
+                {
+                    "qty_in_transit": line.qty_sent,
+                }
+            )
 
         # ========================================================
         # FINALIZAR LA CORRECCIÓN
@@ -997,7 +1273,7 @@ class StoreTransfer(models.Model):
                 (4, picking.id) for picking in correction_pickings
             ]
 
-        self.write(values)
+        self._write_internal(values)
 
         return {
             "type": "ir.actions.client",
@@ -1016,7 +1292,6 @@ class StoreTransfer(models.Model):
                 },
             },
         }
-
 
     # ============================================================
     # CREAR / ABRIR DEVOLUCIÓN DE UNA TRANSFERENCIA RECIBIDA
@@ -1092,9 +1367,7 @@ class StoreTransfer(models.Model):
                 ]
             )
 
-            already_returned = sum(
-                previous_return_lines.mapped("qty_received")
-            )
+            already_returned = sum(previous_return_lines.mapped("qty_received"))
 
             available_qty = max(
                 line.qty_received - already_returned,
@@ -1103,11 +1376,14 @@ class StoreTransfer(models.Model):
 
             # Si este producto ya fue devuelto completamente,
             # no necesitamos mostrarlo en una nueva devolución.
-            if float_compare(
-                available_qty,
-                0.0,
-                precision_rounding=line.uom_id.rounding,
-            ) <= 0:
+            if (
+                float_compare(
+                    available_qty,
+                    0.0,
+                    precision_rounding=line.uom_id.rounding,
+                )
+                <= 0
+            ):
                 continue
 
             return_lines.append(
@@ -1135,15 +1411,12 @@ class StoreTransfer(models.Model):
             {
                 "company_id": self.company_id.id,
                 "original_transfer_id": self.id,
-
                 # El almacén que recibió ahora será quien devuelve.
                 "source_warehouse_id": self.destination_warehouse_id.id,
                 "source_location_id": self.destination_location_id.id,
-
                 # El almacén que envió originalmente ahora recibe.
                 "destination_warehouse_id": self.source_warehouse_id.id,
                 "destination_location_id": self.source_location_id.id,
-
                 "line_ids": return_lines,
             }
         )
@@ -1175,9 +1448,7 @@ class StoreTransfer(models.Model):
             )
 
         if self.state == "cancelled":
-            raise UserError(
-                "Esta transferencia ya se encuentra anulada."
-            )
+            raise UserError("Esta transferencia ya se encuentra anulada.")
 
         # Solo el almacén origen puede iniciar la anulación.
         if not self.is_source_user:
@@ -1278,8 +1549,7 @@ class StoreTransfer(models.Model):
 
             if not picking_type:
                 raise UserError(
-                    "No se encontró el tipo de traslado interno "
-                    "del almacén origen."
+                    "No se encontró el tipo de traslado interno " "del almacén origen."
                 )
 
             # ----------------------------------------------------
@@ -1290,11 +1560,14 @@ class StoreTransfer(models.Model):
 
             for line in self.line_ids:
 
-                if float_compare(
-                    line.qty_in_transit,
-                    0.0,
-                    precision_rounding=line.uom_id.rounding,
-                ) <= 0:
+                if (
+                    float_compare(
+                        line.qty_in_transit,
+                        0.0,
+                        precision_rounding=line.uom_id.rounding,
+                    )
+                    <= 0
+                ):
                     continue
 
                 move_values.append(
@@ -1321,7 +1594,6 @@ class StoreTransfer(models.Model):
                         # Identificarlo como movimiento técnico TRF.
                         "is_store_transfer_technical": True,
                         "store_transfer_id": self.id,
-
                         "picking_type_id": picking_type.id,
                         "location_id": transit_location.id,
                         "location_dest_id": self.source_location_id.id,
@@ -1348,21 +1620,24 @@ class StoreTransfer(models.Model):
             # Ya no queda mercadería de este TRF en tránsito.
             # ----------------------------------------------------
             for line in self.line_ids:
-                line.qty_in_transit = 0.0
+                # Al anular, ya no queda mercadería de este TRF en tránsito.
+                line._write_internal(
+                    {
+                        "qty_in_transit": 0.0,
+                    }
+                )
 
         # ========================================================
         # REGISTRAR LA ANULACIÓN
         # ========================================================
-        self.write(
+        self._write_internal(
             {
                 "state": "cancelled",
                 "cancel_reason": reason,
                 "cancelled_by_id": self.env.user.id,
                 "cancelled_date": fields.Datetime.now(),
                 "cancellation_picking_id": (
-                    cancellation_picking.id
-                    if cancellation_picking
-                    else False
+                    cancellation_picking.id if cancellation_picking else False
                 ),
             }
         )
@@ -1405,6 +1680,193 @@ class StoreTransferLine(models.Model):
     _name = "dt.store.transfer.line"
     _description = "Detalle de Transferencia entre Tiendas"
     _order = "id"
+
+    # ============================================================
+    # CREACIÓN SEGURA DE LÍNEAS TRF
+    #
+    # Un usuario de tienda únicamente puede agregar productos
+    # mientras la transferencia esté en Borrador y sea el almacén
+    # origen.
+    #
+    # No se permite crear manualmente cantidades técnicas como:
+    # - cantidad inicial;
+    # - cantidad en tránsito;
+    # - cantidad recibida.
+    # ============================================================
+
+    @api.model_create_multi
+    def create(self, vals_list):
+
+        if self._is_restricted_store_user():
+
+            for vals in vals_list:
+
+                # ------------------------------------------------
+                # SOLO CAMPOS OPERATIVOS DURANTE LA CREACIÓN
+                # ------------------------------------------------
+                protected_fields = {
+                    "original_qty_sent",
+                    "qty_in_transit",
+                    "qty_received",
+                }
+
+                if set(vals) & protected_fields:
+                    raise UserError(
+                        "No puede establecer cantidades técnicas "
+                        "al crear un producto de la transferencia."
+                    )
+
+                # ------------------------------------------------
+                # LA LÍNEA DEBE PERTENECER A UN TRF
+                # ------------------------------------------------
+                transfer_id = vals.get("transfer_id")
+
+                if not transfer_id:
+                    raise UserError("La línea debe pertenecer a una transferencia.")
+
+                transfer = self.env["dt.store.transfer"].browse(transfer_id)
+
+                if not transfer.exists():
+                    raise UserError("La transferencia indicada no existe.")
+
+                # ------------------------------------------------
+                # SOLO SE AGREGAN PRODUCTOS EN BORRADOR
+                # ------------------------------------------------
+                if transfer.state != "draft":
+                    raise UserError(
+                        "No puede agregar productos a una transferencia "
+                        "que ya fue enviada."
+                    )
+
+                # ------------------------------------------------
+                # SOLO EL ALMACÉN ORIGEN PUEDE AGREGAR PRODUCTOS
+                # ------------------------------------------------
+                if not transfer.is_source_user:
+                    raise UserError(
+                        "Solo el almacén origen puede agregar productos "
+                        "a esta transferencia."
+                    )
+
+        return super().create(vals_list)
+
+    # ============================================================
+    # SEGURIDAD DE ESCRITURA DE LAS LÍNEAS DEL TRF
+    #
+    # Reglas para usuarios de tienda:
+    #
+    # BORRADOR:
+    # - Origen puede modificar producto y cantidad enviada.
+    #
+    # POR RECIBIR:
+    # - Destino puede modificar únicamente cantidad recibida.
+    #
+    # OBSERVADA:
+    # - Origen puede corregir únicamente cantidad enviada.
+    #
+    # RECIBIDA / ANULADA:
+    # - Ninguna cantidad puede modificarse manualmente.
+    #
+    # Los campos técnicos se modifican únicamente mediante
+    # _write_internal() desde los procesos oficiales del módulo.
+    # ============================================================
+
+    def _is_restricted_store_user(self):
+        user = self.env.user
+
+        return user.has_group(
+            "pos_stock_restriccion_tienda.group_tienda_restringida"
+        ) and not user.has_group("base.group_system")
+
+    def _write_internal(self, vals):
+        """Escritura interna para cantidades técnicas del TRF."""
+        return super(StoreTransferLine, self).write(vals)
+
+    def write(self, vals):
+
+        # Administradores/TI mantienen comportamiento normal.
+        if not self._is_restricted_store_user():
+            return super().write(vals)
+
+        fields_to_write = set(vals)
+
+        # --------------------------------------------------------
+        # CAMPOS TÉCNICOS
+        # Nunca deben modificarse manualmente desde una tienda.
+        # --------------------------------------------------------
+        protected_fields = {
+            "transfer_id",
+            "original_qty_sent",
+            "qty_in_transit",
+        }
+
+        if fields_to_write & protected_fields:
+            raise UserError(
+                "No puede modificar directamente datos técnicos " "de la transferencia."
+            )
+
+        # --------------------------------------------------------
+        # VALIDAR CADA LÍNEA SEGÚN ESTADO Y ROL
+        # --------------------------------------------------------
+        for line in self:
+
+            transfer = line.transfer_id
+
+            # BORRADOR:
+            # solo origen modifica producto y cantidad enviada.
+            if transfer.state == "draft":
+
+                if not transfer.is_source_user:
+                    raise UserError(
+                        "Solo el almacén origen puede modificar "
+                        "los productos de esta transferencia."
+                    )
+
+                allowed_fields = {
+                    "product_id",
+                    "qty_sent",
+                }
+
+            # POR RECIBIR:
+            # solo destino registra cantidad recibida.
+            elif transfer.state == "waiting":
+
+                if not transfer.is_destination_user:
+                    raise UserError(
+                        "Solo el almacén destino puede registrar "
+                        "la cantidad recibida."
+                    )
+
+                allowed_fields = {
+                    "qty_received",
+                }
+
+            # OBSERVADA:
+            # solo origen corrige cantidad enviada.
+            elif transfer.state == "observed":
+
+                if not transfer.is_source_user:
+                    raise UserError(
+                        "Solo el almacén origen puede corregir " "la cantidad enviada."
+                    )
+
+                allowed_fields = {
+                    "qty_sent",
+                }
+
+            # RECIBIDA / ANULADA
+            else:
+                raise UserError(
+                    "Esta transferencia ya no permite modificar " "sus cantidades."
+                )
+
+            invalid_fields = fields_to_write - allowed_fields
+
+            if invalid_fields:
+                raise UserError(
+                    "No tiene permiso para modificar esos datos " "de la transferencia."
+                )
+
+        return super().write(vals)
 
     transfer_id = fields.Many2one(
         "dt.store.transfer",

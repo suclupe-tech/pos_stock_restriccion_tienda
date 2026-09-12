@@ -276,18 +276,279 @@ class StoreTransferReturn(models.Model):
     )
 
     # ============================================================
-    # NUMERACIÓN AUTOMÁTICA
+    # CREACIÓN SEGURA DE DEVOLUCIONES
+    #
+    # Una DEV debe nacer siempre desde un TRF recibido.
+    #
+    # El origen y destino de la DEV son obligatoriamente inversos
+    # respecto al TRF original:
+    #
+    # TRF: Origen A -> Destino B
+    # DEV: Origen B -> Destino A
+    #
+    # Además, únicamente el almacén que recibió el TRF puede
+    # iniciar la devolución.
     # ============================================================
     @api.model_create_multi
     def create(self, vals_list):
+
+        if self._is_restricted_store_user():
+
+            protected_fields = {
+                "sent_by_id",
+                "sent_date",
+                "observed_by_id",
+                "observed_date",
+                "received_by_id",
+                "received_date",
+                "sent_picking_id",
+                "receipt_picking_id",
+                "corrected_by_id",
+                "corrected_date",
+                "correction_picking_ids",
+                "cancel_reason",
+                "cancelled_by_id",
+                "cancelled_date",
+                "cancellation_picking_id",
+            }
+
+            for vals in vals_list:
+
+                # ------------------------------------------------
+                # IMPEDIR AUDITORÍA Y DATOS TÉCNICOS MANUALES
+                # ------------------------------------------------
+                if set(vals) & protected_fields:
+                    raise UserError(
+                        "No puede establecer datos internos "
+                        "al crear una devolución."
+                    )
+
+                # ------------------------------------------------
+                # LA DEV SIEMPRE NACE EN BORRADOR
+                # ------------------------------------------------
+                if vals.get("state", "draft") != "draft":
+                    raise UserError(
+                        "Una devolución nueva debe crearse "
+                        "en estado Borrador."
+                    )
+
+                # ------------------------------------------------
+                # LA NUMERACIÓN LA GENERA EL SISTEMA
+                # ------------------------------------------------
+                if vals.get("name") not in (False, None, "Nuevo"):
+                    raise UserError(
+                        "El número de devolución es generado "
+                        "automáticamente por el sistema."
+                    )
+
+                # ------------------------------------------------
+                # DEBE EXISTIR UN TRF ORIGINAL
+                # ------------------------------------------------
+                original_transfer_id = vals.get(
+                    "original_transfer_id"
+                )
+
+                if not original_transfer_id:
+                    raise UserError(
+                        "La devolución debe originarse desde "
+                        "una transferencia."
+                    )
+
+                original_transfer = self.env[
+                    "dt.store.transfer"
+                ].browse(original_transfer_id)
+
+                if not original_transfer.exists():
+                    raise UserError(
+                        "La transferencia original no existe."
+                    )
+
+                # ------------------------------------------------
+                # EL TRF ORIGINAL DEBE ESTAR RECIBIDO
+                # ------------------------------------------------
+                if original_transfer.state != "received":
+                    raise UserError(
+                        "Solo se pueden crear devoluciones de "
+                        "transferencias Recibidas."
+                    )
+
+                # ------------------------------------------------
+                # SOLO QUIEN RECIBIÓ EL TRF PUEDE DEVOLVER
+                # ------------------------------------------------
+                if not original_transfer.is_destination_user:
+                    raise UserError(
+                        "Solo el almacén que recibió la transferencia "
+                        "puede iniciar la devolución."
+                    )
+
+                # ------------------------------------------------
+                # VALIDAR COMPAÑÍA
+                # ------------------------------------------------
+                company_id = vals.get(
+                    "company_id",
+                    original_transfer.company_id.id,
+                )
+
+                if company_id != original_transfer.company_id.id:
+                    raise UserError(
+                        "La compañía de la devolución no coincide "
+                        "con la transferencia original."
+                    )
+
+                # ------------------------------------------------
+                # VALIDAR ORIGEN Y DESTINO INVERTIDOS
+                # ------------------------------------------------
+                expected_values = {
+                    "source_warehouse_id":
+                        original_transfer.destination_warehouse_id.id,
+                    "source_location_id":
+                        original_transfer.destination_location_id.id,
+                    "destination_warehouse_id":
+                        original_transfer.source_warehouse_id.id,
+                    "destination_location_id":
+                        original_transfer.source_location_id.id,
+                }
+
+                for field_name, expected_id in expected_values.items():
+
+                    if vals.get(field_name) != expected_id:
+                        raise UserError(
+                            "El origen o destino de la devolución "
+                            "no coincide con la transferencia original."
+                        )
+
+        # ========================================================
+        # NUMERACIÓN AUTOMÁTICA DEV
+        # ========================================================
         for vals in vals_list:
             if vals.get("name", "Nuevo") == "Nuevo":
                 vals["name"] = (
-                    self.env["ir.sequence"].next_by_code("dt.store.transfer.return")
+                    self.env["ir.sequence"].next_by_code(
+                        "dt.store.transfer.return"
+                    )
                     or "Nuevo"
                 )
 
         return super().create(vals_list)
+
+    # ============================================================
+    # SEGURIDAD DE ESCRITURA DEL DOCUMENTO DEV
+    #
+    # Un usuario de tienda:
+    # - puede modificar el motivo mientras la DEV está Borrador;
+    # - puede modificar las líneas únicamente mediante el flujo
+    #   operativo correspondiente;
+    # - no puede alterar directamente estados, auditoría,
+    #   almacenes ni movimientos técnicos.
+    #
+    # Los botones oficiales utilizan _write_internal() para
+    # realizar cambios controlados desde servidor.
+    # ============================================================
+
+    def _is_restricted_store_user(self):
+        """Indica si deben aplicarse las restricciones de tienda."""
+        user = self.env.user
+
+        return user.has_group(
+            "pos_stock_restriccion_tienda.group_tienda_restringida"
+        ) and not user.has_group("base.group_system")
+
+    def _write_internal(self, vals):
+        """Escritura interna para procesos oficiales de la DEV."""
+        return super(StoreTransferReturn, self).write(vals)
+
+    def write(self, vals):
+
+        # Administradores/TI mantienen el comportamiento normal.
+        if not self._is_restricted_store_user():
+            return super().write(vals)
+
+        fields_to_write = set(vals)
+
+        # --------------------------------------------------------
+        # CAMPOS INTERNOS QUE UNA TIENDA NUNCA MODIFICA DIRECTAMENTE
+        # --------------------------------------------------------
+        protected_fields = {
+            "name",
+            "company_id",
+            "original_transfer_id",
+            "source_warehouse_id",
+            "destination_warehouse_id",
+            "source_location_id",
+            "destination_location_id",
+            "state",
+            "sent_by_id",
+            "sent_date",
+            "observed_by_id",
+            "observed_date",
+            "received_by_id",
+            "received_date",
+            "sent_picking_id",
+            "receipt_picking_id",
+            "corrected_by_id",
+            "corrected_date",
+            "correction_picking_ids",
+            "cancel_reason",
+            "cancelled_by_id",
+            "cancelled_date",
+            "cancellation_picking_id",
+        }
+
+        if fields_to_write & protected_fields:
+            raise UserError(
+                "No puede modificar directamente datos internos " "de la devolución."
+            )
+
+        # --------------------------------------------------------
+        # VALIDAR SEGÚN ESTADO Y ROL
+        # --------------------------------------------------------
+        for return_doc in self:
+
+            # BORRADOR:
+            # Solo el origen de la DEV puede modificar motivo/líneas.
+            if return_doc.state == "draft":
+
+                if not return_doc.is_source_user:
+                    raise UserError(
+                        "Solo el almacén origen puede modificar " "esta devolución."
+                    )
+
+                allowed_fields = {
+                    "reason",
+                    "line_ids",
+                }
+
+            # POR RECIBIR:
+            # Permitimos únicamente cambios en líneas.
+            # La seguridad específica se controlará en el modelo línea.
+            elif return_doc.state == "waiting":
+
+                allowed_fields = {
+                    "line_ids",
+                }
+
+            # OBSERVADA:
+            # Permitimos únicamente cambios en líneas.
+            # La cantidad corregida se protegerá por rol en la línea.
+            elif return_doc.state == "observed":
+
+                allowed_fields = {
+                    "line_ids",
+                }
+
+            # RECIBIDA / ANULADA:
+            # Ya no se modifica información operativa.
+            else:
+                allowed_fields = set()
+
+            invalid_fields = fields_to_write - allowed_fields
+
+            if invalid_fields:
+                raise UserError(
+                    "Esta devolución ya no permite modificar " "esos datos."
+                )
+
+        return super().write(vals)
 
     # ============================================================
     # EVITAR DEVOLUCIONES ACTIVAS DUPLICADAS
@@ -581,13 +842,18 @@ class StoreTransferReturn(models.Model):
             # y después dejamos el tránsito de la DEV en cero.
             # ========================================================
             for line in lines_in_transit:
-                line.qty_cancelled = line.qty_in_transit
-                line.qty_in_transit = 0.0
+                # Guardar cuánto regresó al origen y dejar el tránsito en cero.
+                line._write_internal(
+                    {
+                        "qty_cancelled": line.qty_in_transit,
+                        "qty_in_transit": 0.0,
+                    }
+                )
 
         # ========================================================
         # FINALIZAR ANULACIÓN Y GUARDAR AUDITORÍA
         # ========================================================
-        self.write(
+        self._write_internal(
             {
                 "state": "cancelled",
                 "cancel_reason": reason,
@@ -816,14 +1082,22 @@ class StoreTransferReturn(models.Model):
         for line in self.line_ids:
 
             if line in lines_to_return:
-                line.qty_in_transit = line.qty_to_return
+                line._write_internal(
+                    {
+                        "qty_in_transit": line.qty_to_return,
+                    }
+                )
             else:
-                line.qty_in_transit = 0.0
+                line._write_internal(
+                    {
+                        "qty_in_transit": 0.0,
+                    }
+                )
 
         # ========================================================
         # FINALIZAR ENVÍO
         # ========================================================
-        self.write(
+        self._write_internal(
             {
                 "state": "waiting",
                 "sent_by_id": self.env.user.id,
@@ -940,10 +1214,15 @@ class StoreTransferReturn(models.Model):
             # de ejecutar la corrección.
             # ========================================================
             for line in lines_to_receive:
-                line.qty_corrected = line.qty_received
-                line.is_corrected = False
+                # Proponer como corrección la cantidad contada por el destino.
+                line._write_internal(
+                    {
+                        "qty_corrected": line.qty_received,
+                        "is_corrected": False,
+                    }
+                )
 
-            self.write(
+            self._write_internal(
                 {
                     "state": "observed",
                     "observed_by_id": self.env.user.id,
@@ -1052,12 +1331,16 @@ class StoreTransferReturn(models.Model):
 
         # Ya no queda mercadería de esta DEV en tránsito.
         for line in lines_to_receive:
-            line.qty_in_transit = 0.0
+            line._write_internal(
+                {
+                    "qty_in_transit": 0.0,
+                }
+            )
 
         # ========================================================
         # FINALIZAR DEVOLUCIÓN
         # ========================================================
-        self.write(
+        self._write_internal(
             {
                 "state": "received",
                 "received_by_id": self.env.user.id,
@@ -1379,8 +1662,13 @@ class StoreTransferReturn(models.Model):
                 > 0
             ):
 
-                line.qty_in_transit = line.qty_corrected
-                line.is_corrected = True
+                # Actualizar la cantidad real que continuará en tránsito.
+                line._write_internal(
+                    {
+                        "qty_in_transit": line.qty_corrected,
+                        "is_corrected": True,
+                    }
+                )
 
         # ========================================================
         # GUARDAR AUDITORÍA Y VOLVER A "POR RECIBIR"
@@ -1396,7 +1684,7 @@ class StoreTransferReturn(models.Model):
                 fields.Command.link(picking.id) for picking in correction_pickings
             ]
 
-        self.write(values)
+        self._write_internal(values)
 
         return {
             "type": "ir.actions.client",
@@ -1421,6 +1709,285 @@ class StoreTransferReturnLine(models.Model):
     _name = "dt.store.transfer.return.line"
     _description = "Detalle de Devolución de Transferencia"
     _order = "id"
+
+    # ============================================================
+    # CREACIÓN SEGURA DE LÍNEAS DEV
+    #
+    # Las líneas de una devolución deben proceder siempre de una
+    # línea perteneciente al TRF original.
+    #
+    # Para usuarios de tienda:
+    # - la DEV debe estar en Borrador;
+    # - solo el almacén origen de la DEV puede generar sus líneas;
+    # - no se permiten cantidades técnicas precargadas;
+    # - una línea del TRF no puede aparecer dos veces en la misma DEV.
+    # ============================================================
+
+    @api.model_create_multi
+    def create(self, vals_list):
+
+        if self._is_restricted_store_user():
+
+            # Evita duplicados incluso si varias líneas llegan juntas
+            # dentro del mismo create() de la devolución.
+            pending_pairs = set()
+
+            for vals in vals_list:
+
+                # ------------------------------------------------
+                # CAMPOS TÉCNICOS QUE NO PUEDEN LLEGAR MANUALMENTE
+                # ------------------------------------------------
+                protected_fields = {
+                    "product_id",
+                    "uom_id",
+                    "original_received_qty",
+                    "already_returned_qty",
+                    "available_return_qty",
+                    "qty_in_transit",
+                    "qty_cancelled",
+                    "qty_received",
+                    "qty_corrected",
+                    "is_corrected",
+                }
+
+                if set(vals) & protected_fields:
+                    raise UserError(
+                        "No puede establecer cantidades o datos técnicos "
+                        "al crear una línea de devolución."
+                    )
+
+                # ------------------------------------------------
+                # LA LÍNEA DEBE PERTENECER A UNA DEV
+                # ------------------------------------------------
+                return_id = vals.get("return_id")
+
+                if not return_id:
+                    raise UserError(
+                        "La línea debe pertenecer a una devolución."
+                    )
+
+                return_doc = self.env[
+                    "dt.store.transfer.return"
+                ].browse(return_id)
+
+                if not return_doc.exists():
+                    raise UserError(
+                        "La devolución indicada no existe."
+                    )
+
+                # ------------------------------------------------
+                # SOLO SE GENERAN LÍNEAS MIENTRAS ESTÁ EN BORRADOR
+                # ------------------------------------------------
+                if return_doc.state != "draft":
+                    raise UserError(
+                        "No puede agregar productos a una devolución "
+                        "que ya fue enviada."
+                    )
+
+                # ------------------------------------------------
+                # SOLO EL ORIGEN DE LA DEV PUEDE GENERAR LÍNEAS
+                # ------------------------------------------------
+                if not return_doc.is_source_user:
+                    raise UserError(
+                        "Solo el almacén origen puede agregar productos "
+                        "a esta devolución."
+                    )
+
+                # ------------------------------------------------
+                # DEBE EXISTIR UNA LÍNEA DEL TRF ORIGINAL
+                # ------------------------------------------------
+                original_line_id = vals.get(
+                    "original_transfer_line_id"
+                )
+
+                if not original_line_id:
+                    raise UserError(
+                        "La línea de devolución debe estar relacionada "
+                        "con un producto de la transferencia original."
+                    )
+
+                original_line = self.env[
+                    "dt.store.transfer.line"
+                ].browse(original_line_id)
+
+                if not original_line.exists():
+                    raise UserError(
+                        "La línea de la transferencia original no existe."
+                    )
+
+                # ------------------------------------------------
+                # LA LÍNEA DEBE PERTENECER AL TRF DE ESTA DEV
+                # ------------------------------------------------
+                if (
+                    original_line.transfer_id
+                    != return_doc.original_transfer_id
+                ):
+                    raise UserError(
+                        "El producto no pertenece a la transferencia "
+                        "original de esta devolución."
+                    )
+
+                # ------------------------------------------------
+                # EVITAR EL MISMO PRODUCTO/LÍNEA DOS VECES
+                # ------------------------------------------------
+                pair = (
+                    return_doc.id,
+                    original_line.id,
+                )
+
+                if pair in pending_pairs:
+                    raise UserError(
+                        "No puede repetir la misma línea de la "
+                        "transferencia en una devolución."
+                    )
+
+                duplicate = self.search(
+                    [
+                        ("return_id", "=", return_doc.id),
+                        (
+                            "original_transfer_line_id",
+                            "=",
+                            original_line.id,
+                        ),
+                    ],
+                    limit=1,
+                )
+
+                if duplicate:
+                    raise UserError(
+                        "Este producto ya se encuentra registrado "
+                        "en la devolución."
+                    )
+
+                pending_pairs.add(pair)
+
+        return super().create(vals_list)
+
+    # ============================================================
+    # SEGURIDAD DE ESCRITURA DE LAS LÍNEAS DEV
+    #
+    # Reglas para usuarios de tienda:
+    #
+    # BORRADOR:
+    # - El origen puede modificar únicamente la cantidad a devolver.
+    #
+    # POR RECIBIR:
+    # - El destino puede registrar únicamente la cantidad recibida.
+    #
+    # OBSERVADA:
+    # - El origen puede modificar únicamente la cantidad corregida.
+    #
+    # RECIBIDA / ANULADA:
+    # - No se permite modificar cantidades manualmente.
+    #
+    # Los campos técnicos son modificados únicamente por los
+    # procesos oficiales utilizando _write_internal().
+    # ============================================================
+
+    def _is_restricted_store_user(self):
+        """Indica si deben aplicarse las restricciones de tienda."""
+        user = self.env.user
+
+        return user.has_group(
+            "pos_stock_restriccion_tienda.group_tienda_restringida"
+        ) and not user.has_group("base.group_system")
+
+    def _write_internal(self, vals):
+        """Escritura interna para cantidades técnicas de la DEV."""
+        return super(StoreTransferReturnLine, self).write(vals)
+
+    def write(self, vals):
+
+        # Administradores/TI mantienen el comportamiento normal.
+        if not self._is_restricted_store_user():
+            return super().write(vals)
+
+        fields_to_write = set(vals)
+
+        # --------------------------------------------------------
+        # CAMPOS TÉCNICOS
+        # Nunca deben ser modificados directamente por una tienda.
+        # --------------------------------------------------------
+        protected_fields = {
+            "return_id",
+            "original_transfer_line_id",
+            "product_id",
+            "uom_id",
+            "original_received_qty",
+            "qty_in_transit",
+            "qty_cancelled",
+            "is_corrected",
+        }
+
+        if fields_to_write & protected_fields:
+            raise UserError(
+                "No puede modificar directamente datos técnicos " "de la devolución."
+            )
+
+        # --------------------------------------------------------
+        # VALIDAR ESTADO Y ROL DEL USUARIO
+        # --------------------------------------------------------
+        for line in self:
+
+            return_doc = line.return_id
+
+            # BORRADOR:
+            # El origen decide cuánto devolver.
+            if return_doc.state == "draft":
+
+                if not return_doc.is_source_user:
+                    raise UserError(
+                        "Solo el almacén origen puede modificar "
+                        "la cantidad a devolver."
+                    )
+
+                allowed_fields = {
+                    "qty_to_return",
+                }
+
+            # POR RECIBIR:
+            # El destino registra cuánto recibió físicamente.
+            elif return_doc.state == "waiting":
+
+                if not return_doc.is_destination_user:
+                    raise UserError(
+                        "Solo el almacén destino puede registrar "
+                        "la cantidad recibida."
+                    )
+
+                allowed_fields = {
+                    "qty_received",
+                }
+
+            # OBSERVADA:
+            # El origen decide la cantidad corregida.
+            elif return_doc.state == "observed":
+
+                if not return_doc.is_source_user:
+                    raise UserError(
+                        "Solo el almacén origen puede corregir "
+                        "la cantidad de la devolución."
+                    )
+
+                allowed_fields = {
+                    "qty_corrected",
+                }
+
+            # RECIBIDA / ANULADA:
+            # La DEV queda cerrada.
+            else:
+                raise UserError(
+                    "Esta devolución ya no permite modificar " "sus cantidades."
+                )
+
+            invalid_fields = fields_to_write - allowed_fields
+
+            if invalid_fields:
+                raise UserError(
+                    "No tiene permiso para modificar esos datos " "de la devolución."
+                )
+
+        return super().write(vals)
 
     return_id = fields.Many2one(
         "dt.store.transfer.return",
