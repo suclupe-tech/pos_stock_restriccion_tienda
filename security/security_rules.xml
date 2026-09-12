@@ -59,4 +59,95 @@
         <field name="active" eval="True"/>
     </record>
 
+    <!-- ============================================================
+         7. TRANSFERENCIAS ENTRE TIENDAS
+         El usuario solo puede ver documentos donde su almacén
+         participe como origen o como destino.
+         ============================================================ -->
+    <record id="rule_dt_store_transfer_tienda" model="ir.rule">
+        <field name="name">Transferencias solo de mis almacenes permitidos</field>
+        <field name="model_id" ref="model_dt_store_transfer"/>
+        <field name="groups"
+               eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
+
+        <field name="domain_force">
+            ['|',
+                ('source_warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+                ('destination_warehouse_id', 'in', user.allowed_warehouse_ids.ids)
+            ]
+        </field>
+    </record>
+
+    <!-- ============================================================
+         8. DETALLE DE LAS TRANSFERENCIAS
+         Aplica la misma restricción a las líneas de productos.
+         Evita que una tienda pueda consultar líneas de documentos
+         pertenecientes a otras tiendas.
+         ============================================================ -->
+    <record id="rule_dt_store_transfer_line_tienda" model="ir.rule">
+        <field name="name">Detalles solo de mis transferencias</field>
+        <field name="model_id" ref="model_dt_store_transfer_line"/>
+        <field name="groups"
+               eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
+
+        <field name="domain_force">
+            ['|',
+                ('transfer_id.source_warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+                ('transfer_id.destination_warehouse_id', 'in', user.allowed_warehouse_ids.ids)
+            ]
+        </field>
+    </record>
+
+    <!-- ============================================================
+         9. DEVOLUCIONES ENTRE TIENDAS
+         El usuario solo puede ver documentos DEV donde uno de sus
+         almacenes participe como origen o destino de la devolución.
+
+         Ejemplo:
+         DEV/000001
+         DETALLES TEXTILES -> HUANUCO
+
+         La verá:
+         - DETALLES TEXTILES
+         - HUANUCO
+
+         Otras tiendas no participantes no la verán.
+         ============================================================ -->
+    <record id="rule_dt_store_transfer_return_tienda" model="ir.rule">
+        <field name="name">Devoluciones solo de mis almacenes permitidos</field>
+        <field name="model_id" ref="model_dt_store_transfer_return"/>
+
+        <field name="groups"
+               eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
+
+        <field name="domain_force">
+            ['|',
+                ('source_warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+                ('destination_warehouse_id', 'in', user.allowed_warehouse_ids.ids)
+            ]
+        </field>
+    </record>
+
+
+    <!-- ============================================================
+         10. DETALLE DE LAS DEVOLUCIONES
+
+         Aplica la misma restricción a los productos contenidos
+         dentro de cada DEV/xxxxx.
+         ============================================================ -->
+    <record id="rule_dt_store_transfer_return_line_tienda" model="ir.rule">
+        <field name="name">Detalles solo de mis devoluciones</field>
+        <field name="model_id" ref="model_dt_store_transfer_return_line"/>
+
+        <field name="groups"
+               eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
+
+        <field name="domain_force">
+            ['|',
+                ('return_id.source_warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+                ('return_id.destination_warehouse_id', 'in', user.allowed_warehouse_ids.ids)
+            ]
+        </field>
+    </record>
+
 </odoo>

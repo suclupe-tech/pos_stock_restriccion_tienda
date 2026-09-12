@@ -7,12 +7,23 @@
     "depends": ["base", "stock", "point_of_sale"],
     "assets": {},
     "data": [
+        # permisos y reglas de seguridad
         "security/security_groups.xml",
+        # Permisos de acceso del nuevo modelo de transferencias
+        "security/ir.model.access.csv",
+        "wizard/store_transfer_cancel_wizard_views.xml",
         "security/security_rules.xml",
+        # numero automatico de transferencias entre tiendas
+        "data/store_transfer_sequence.xml",
+        "data/store_transfer_return_sequence.xml",
+        # vistas
         "views/res_users_views.xml",
         "views/stock_quant_views.xml",
         "views/stock_picking_type_views.xml",
         "views/stock_picking_menu_views.xml",
+        "views/store_transfer_views.xml",
+        "views/store_transfer_return_views.xml",
+        "views/stock_picking_technical_filter.xml",
     ],
     "installable": True,
     "application": False,

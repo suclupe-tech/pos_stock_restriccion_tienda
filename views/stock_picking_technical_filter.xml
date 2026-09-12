@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- ============================================================
+         FILTROS PARA MOVIMIENTOS TÉCNICOS DEL FLUJO TRF
+
+         Los movimientos técnicos siguen existiendo para auditoría,
+         pero se ocultan por defecto de las vistas operativas.
+         ============================================================ -->
+
+    <record id="view_picking_internal_search_trf_inherit"
+            model="ir.ui.view">
+
+        <field name="name">stock.picking.internal.search.trf.inherit</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_internal_search"/>
+
+        <field name="arch" type="xml">
+
+            <xpath expr="//filter[@name='my_transfers']"
+                   position="after">
+
+                <!-- Transferencias normales visibles al usuario -->
+                <filter name="operational_trf"
+                        string="Movimientos operativos"
+                        domain="[('is_store_transfer_technical', '=', False)]"/>
+
+                <!-- Movimientos internos generados por TRF/xxxxx -->
+                <filter name="technical_trf"
+                        string="Movimientos técnicos TRF"
+                        domain="[('is_store_transfer_technical', '=', True)]"/>
+
+                <separator/>
+
+            </xpath>
+
+        </field>
+    </record>
+
+
+    <!-- ============================================================
+         VISTA GENERAL DE TRANSFERENCIAS
+         IMPORTANTE: el context se mantiene en una sola línea.
+         ============================================================ -->
+    <record id="stock.action_picking_tree_all"
+            model="ir.actions.act_window">
+        <field name="context">{'contact_display': 'partner_address', 'default_company_id': allowed_company_ids[0], 'search_default_operational_trf': 1}</field>
+    </record>
+
+
+    <!-- ============================================================
+         TRASLADOS INTERNOS
+         IMPORTANTE: el context se mantiene en una sola línea para
+         que stock.picking pueda procesarlo con literal_eval().
+         ============================================================ -->
+    <record id="stock.action_picking_tree_internal"
+            model="ir.actions.act_window">
+        <field name="context">{'contact_display': 'partner_address', 'restricted_picking_type_code': 'internal', 'search_default_internal': 1, 'search_default_operational_trf': 1}</field>
+    </record>
+
+</odoo>

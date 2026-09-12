@@ -1,0 +1,9 @@
+# ============================================================
+# ARCHIVOS TEMPORALES DE PYTHON
+# No deben guardarse en Git porque Python/Odoo los genera
+# automáticamente al ejecutar el código.
+# ============================================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd

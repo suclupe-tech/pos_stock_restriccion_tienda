@@ -64,6 +64,20 @@ class ResUsers(models.Model):
             ):
                 user.allowed_pos_config_ids = [(4, user.pos_config_id.id)]
 
+    # ============================================================
+    # UBICACIONES DESTINO PERMITIDAS
+    #
+    # Permite que una tienda pueda seleccionar como destino el
+    # stock principal de los demás almacenes de la compañía.
+    #
+    # También incluye las ubicaciones padre necesarias para que
+    # Odoo pueda mostrar correctamente nombres como:
+    #       WH/Existencias
+    #
+    # Esto NO concede acceso al contenido completo del almacén
+    # destino; solamente a las ubicaciones necesarias para
+    # identificar el destino de una transferencia.
+    # ============================================================
     @api.depends("warehouse_id", "allowed_warehouse_ids", "company_id")
     def _compute_destination_location_ids(self):
         Warehouse = self.env["stock.warehouse"].sudo()
@@ -71,6 +85,7 @@ class ResUsers(models.Model):
         for user in self:
             own_warehouses = user.allowed_warehouse_ids or user.warehouse_id
 
+            # Buscar los demás almacenes de la misma compañía.
             other_warehouses = Warehouse.search(
                 [
                     ("company_id", "=", user.company_id.id),
@@ -78,7 +93,27 @@ class ResUsers(models.Model):
                 ]
             )
 
-            user.destination_location_ids = other_warehouses.mapped("lot_stock_id")
+            # Ubicaciones principales que pueden seleccionarse
+            # como destino: WH/Existencias, TDHU/Existencias, etc.
+            destination_locations = other_warehouses.mapped("lot_stock_id")
+
+            # ----------------------------------------------------
+            # Odoo necesita poder leer también los padres de esas
+            # ubicaciones para construir el nombre completo.
+            #
+            # Ejemplo:
+            #       WH
+            #        └── Existencias
+            # ----------------------------------------------------
+            locations_with_parents = destination_locations
+
+            parents = destination_locations.mapped("location_id")
+
+            while parents:
+                locations_with_parents |= parents
+                parents = parents.mapped("location_id")
+
+            user.destination_location_ids = locations_with_parents
 
     def action_productos_mi_tienda(self):
         user = self.env.user
@@ -164,70 +199,52 @@ class ResUsers(models.Model):
                 user.restriccion_config_estado = "Configuración correcta."
                 user.restriccion_config_nivel = "ok"
 
+    # ============================================================
+    # TRASLADOS INTERNOS DE LA TIENDA
+    #
+    # Mantiene el mismo acceso que ya utiliza la vendedora desde
+    # la tarjeta "Traslados internos" de Inventario.
+    #
+    # Para usuarios restringidos, en lugar de abrir el traslado
+    # estándar de Odoo, abre nuestro nuevo flujo de transferencias
+    # con doble validación.
+    # ============================================================
     def action_transferencias_mi_tienda(self):
         self.ensure_one()
+
         user = self.env.user
 
-        # 1. Obtener los almacenes permitidos (1 para vendedor, 3 para supervisor)
+        # Almacenes que pertenecen al usuario conectado.
+        # Normalmente será uno para la vendedora.
         warehouses = user.allowed_warehouse_ids or user.warehouse_id
 
-        source_locations = self.env["stock.location"].search(
-            [
-                ("warehouse_id", "in", warehouses.ids),
-                ("usage", "=", "internal"),
-            ]
-        )
+        # Almacén que se colocará automáticamente como origen.
+        default_warehouse = user.warehouse_id
 
-        allowed_picking_types = self.env["stock.picking.type"].search(
-            [
-                ("warehouse_id", "in", warehouses.ids),
-                ("code", "=", "internal"),
-            ]
-        )
+        if not default_warehouse and warehouses:
+            default_warehouse = warehouses[:1]
 
-        destination_locations = user.destination_location_ids
-
-        # 2. Buscar el tipo de operación "internal" perteneciente al almacén predeterminado o permitidos
-        picking_type = False
-        if user.warehouse_id:
-            picking_type = self.env["stock.picking.type"].search(
-                [
-                    ("warehouse_id", "=", user.warehouse_id.id),
-                    ("code", "=", "internal"),
-                ],
-                limit=1,
-            )
-
-        if not picking_type and warehouses:
-            picking_type = self.env["stock.picking.type"].search(
-                [("warehouse_id", "in", warehouses.ids), ("code", "=", "internal")],
-                limit=1,
-            )
-
-        # 3. Filtrar en el listado las transferencias pertenecientes a sus almacenes permitidos
-        domain = [("picking_type_id.code", "=", "internal")]
-        if warehouses:
-            domain.append(("picking_type_id.warehouse_id", "in", warehouses.ids))
-
+        # --------------------------------------------------------
+        # Abrir nuestro documento de transferencias.
+        # El usuario seguirá entrando por "Traslados internos".
+        # --------------------------------------------------------
         return {
             "type": "ir.actions.act_window",
-            "name": "Transferencias de Mi Tienda",
-            "res_model": "stock.picking",
+            "name": "Traslados internos",
+            "res_model": "dt.store.transfer",
             "view_mode": "list,form",
             "views": [(False, "list"), (False, "form")],
-            "domain": domain,
+            # Solo muestra transferencias donde uno de los
+            # almacenes del usuario participa como origen o destino.
+            "domain": [
+                "|",
+                ("source_warehouse_id", "in", warehouses.ids),
+                ("destination_warehouse_id", "in", warehouses.ids),
+            ],
             "context": {
-                "search_default_internal": 1,
-                "default_picking_type_id": picking_type.id if picking_type else False,
-                "default_location_id": (
-                    picking_type.default_location_src_id.id
-                    if picking_type and picking_type.default_location_src_id
-                    else False
+                # El origen se coloca automáticamente según la tienda.
+                "default_source_warehouse_id": (
+                    default_warehouse.id if default_warehouse else False
                 ),
-                "default_location_dest_id": False,
-                "restrict_store_transfer": True,
-                "allowed_transfer_picking_type_ids": allowed_picking_types.ids,
-                "allowed_transfer_source_location_ids": source_locations.ids,
-                "allowed_transfer_destination_location_ids": destination_locations.ids,
             },
         }

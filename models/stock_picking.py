@@ -1,8 +1,35 @@
-from odoo import api, models
+from odoo import api, fields, models
 
 
 class StockPicking(models.Model):
     _inherit = "stock.picking"
+
+    # ============================================================
+    # RELACIÓN CON EL NUEVO FLUJO DE TRANSFERENCIAS TRF
+    #
+    # Estos campos permiten distinguir los movimientos internos
+    # creados automáticamente por dt.store.transfer de una
+    # transferencia interna creada manualmente en Odoo.
+    #
+    # Esto permitirá posteriormente ocultar estos movimientos
+    # técnicos de las vistas y exportaciones operativas, pero
+    # conservarlos para auditoría y control de stock.
+    # ============================================================
+
+    is_store_transfer_technical = fields.Boolean(
+        string="Movimiento técnico TRF",
+        default=False,
+        copy=False,
+        index=True,
+    )
+
+    store_transfer_id = fields.Many2one(
+        "dt.store.transfer",
+        string="Transferencia TRF",
+        copy=False,
+        index=True,
+        ondelete="set null",
+    )
 
     @api.model
     def default_get(self, fields_list):

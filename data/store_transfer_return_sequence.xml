@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+
+    <!-- ============================================================
+         SECUENCIA DE DEVOLUCIONES DE TRANSFERENCIAS
+
+         Genera números consecutivos:
+         DEV/000001
+         DEV/000002
+         DEV/000003
+         ============================================================ -->
+
+    <record id="seq_store_transfer_return" model="ir.sequence">
+        <field name="name">Devolución de Transferencia</field>
+        <field name="code">dt.store.transfer.return</field>
+        <field name="prefix">DEV/</field>
+        <field name="padding">6</field>
+        <field name="company_id" eval="False"/>
+    </record>
+
+</odoo>

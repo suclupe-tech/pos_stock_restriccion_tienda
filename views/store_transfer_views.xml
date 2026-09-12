@@ -1,0 +1,328 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+
+    <!-- ============================================================
+         VISTA DE LISTA
+         Muestra todas las transferencias entre tiendas.
+         ============================================================ -->
+    <record id="view_dt_store_transfer_list" model="ir.ui.view">
+        <field name="name">dt.store.transfer.list</field>
+        <field name="model">dt.store.transfer</field>
+        <field name="arch" type="xml">
+            <list string="Transferencias entre Tiendas"
+                    decoration-muted="state == 'cancelled'">
+                <field name="name"/>
+                <!--Origen y destino visible para las tiendas -->
+                <field name="source_location_id"/>
+                <field name="destination_location_id"/>
+                <field name="sent_date"/>
+                <field name="state"/>
+            </list>
+        </field>
+    </record>
+
+    <!-- ============================================================
+         FORMULARIO DE TRASLADO INTERNO
+         Mantiene una estructura similar al traslado estándar de Odoo,
+         pero utiliza nuestro flujo de doble validación.
+         ============================================================ -->
+    <record id="view_dt_store_transfer_form" model="ir.ui.view">
+        <field name="name">dt.store.transfer.form</field>
+        <field name="model">dt.store.transfer</field>
+        <field name="arch" type="xml">
+
+            <form string="Traslado interno">
+
+                <!-- ====================================================
+                     ESTADOS DEL NUEVO FLUJO
+                     ==================================================== -->
+                <header>
+
+                    <!-- ============================================================
+                        ENVIAR MERCADERÍA
+                        Solo aparece mientras el traslado está en Borrador.
+                        Confirma la salida del almacén origen y deja la mercadería
+                        pendiente de recepción en la ubicación técnica de tránsito.
+                        ============================================================ -->
+                    <button name="action_send_transfer"
+                            string="Enviar mercadería"
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'draft'"/>
+
+                    <!-- ============================================================
+                        CONFIRMAR RECEPCIÓN
+                        Solo aparece al almacén destino cuando la transferencia
+                        se encuentra pendiente de recepción.
+                        ============================================================ -->
+                    <button name="action_confirm_receipt"
+                            string="Confirmar recepción"
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'waiting' or not is_destination_user"/>
+
+                    <!-- ============================================================
+                        CONFIRMAR CORRECCIÓN
+
+                        Solo aparece al almacén ORIGEN cuando la transferencia
+                        se encuentra OBSERVADA.
+                        ============================================================ -->
+                    <button name="action_confirm_correction"
+                            string="Confirmar corrección"
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'observed' or not is_source_user"/>
+
+                    <!-- ============================================================
+                        ANULAR TRANSFERENCIA
+
+                        Solo el almacén origen puede anular.
+
+                        Permitido en:
+                        - Borrador
+                        - Por recibir
+                        - Observada
+
+                        No aparece cuando ya está:
+                        - Recibida
+                        - Anulada
+                        ============================================================ -->
+                    <button name="action_open_cancel_wizard"
+                            string="Anular transferencia"
+                            type="object"
+                            class="btn-secondary"
+                            invisible="state not in ('waiting', 'observed') or not is_source_user"/>
+
+                    <!-- ============================================================
+                        DEVOLVER MERCADERÍA
+
+                        Solo aparece cuando:
+                        - La transferencia ya fue RECIBIDA.
+                        - El usuario pertenece al almacén destino.
+
+                        Crea o abre un documento DEV/xxxxx con el origen
+                        y destino invertidos respecto al TRF original.
+                        ============================================================ -->
+                    <button name="action_create_return"
+                            string="Devolver"
+                            type="object"
+                            class="btn-secondary"
+                            invisible="state != 'received' or not is_destination_user"/>
+
+                    <!-- ============================================================
+                        ESTADO DEL TRASLADO
+                        ============================================================ -->
+                    <field name="state"
+                            widget="statusbar"
+                            statusbar_visible="draft,waiting,observed,received,cancelled"/>
+
+                </header>
+
+                <sheet>
+
+                    <!-- Número de transferencia -->
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name"/>
+                        </h1>
+                    </div>
+
+                    <!-- ====================================================
+                         DATOS PRINCIPALES
+                         Campos similares a los que ya utiliza Odoo.
+                         ==================================================== -->
+                    <group>
+                        <group>
+
+                            <!-- Contacto: solo se modifica antes de enviar -->
+                            <field name="partner_id"
+                                string="Contacto"
+                                placeholder="Por ejemplo, proveedor o responsable"
+                                readonly="state != 'draft'"/>
+
+                            <!-- Origen siempre automático -->
+                            <field name="source_location_id"
+                                string="Ubicación de origen"
+                                readonly="1"/>
+
+                            <!-- Campo técnico invisible -->
+                            <field name="allowed_destination_location_ids"
+                                invisible="1"/>
+
+                            <!-- Destino: después del envío queda bloqueado -->
+                            <field name="destination_location_id"
+                                string="Ubicación de destino"
+                                domain="[('id', 'in', allowed_destination_location_ids)]"
+                                readonly="state != 'draft'"/>
+
+                            <!-- Fecha programada: después del envío queda bloqueada -->
+                            <field name="scheduled_date"
+                                string="Fecha programada"
+                                readonly="state != 'draft'"/>
+
+                            <!-- Documento origen: después del envío queda bloqueado -->
+                            <field name="origin_reference"
+                                string="Documento origen"
+                                placeholder="Por ejemplo, guía o pedido"
+                                readonly="state != 'draft'"/>
+
+                        </group>
+                    </group>
+
+                    <!-- ====================================================
+                         OPERACIONES
+                         Aquí el origen registra prendas y cantidades.
+                         ==================================================== -->
+                    <notebook>
+
+                        <page string="Operaciones">
+                            <!-- ============================================================
+                                PRODUCTOS - MODO BORRADOR
+
+                                El almacén origen puede agregar productos y cantidades
+                                solamente antes de enviar la mercadería.
+                                ============================================================ -->
+                            <field name="line_ids"
+                                invisible="state != 'draft'">
+
+                                <list editable="bottom">
+
+                                    <field name="product_id"
+                                        string="Producto"/>
+
+                                    <field name="qty_sent"
+                                        string="Cantidad enviada"/>
+
+                                    <field name="uom_id"
+                                        string="Unidad"
+                                        readonly="1"/>
+
+                                </list>
+
+                            </field>
+                            <!-- ============================================================
+                                PRODUCTOS - DESPUÉS DEL ENVÍO
+
+                                DESTINO:
+                                Puede registrar "Cantidad recibida" únicamente cuando la
+                                transferencia se encuentra POR RECIBIR.
+
+                                ORIGEN:
+                                Si la transferencia queda OBSERVADA, puede corregir solamente
+                                la "Cantidad enviada" de las líneas que tienen diferencia.
+
+                                No se permite agregar ni eliminar productos después del envío.
+                                ============================================================ -->
+                            <field name="line_ids"
+                                invisible="state == 'draft'">
+
+                                <list editable="bottom"
+                                    create="0"
+                                    delete="0">
+
+                                    <!-- Campo técnico utilizado para saber qué línea tiene
+                                        diferencia. No se muestra a la vendedora. -->
+                                    <field name="has_difference"
+                                        column_invisible="1"/>
+
+                                    <field name="product_id"
+                                        string="Producto"
+                                        readonly="1"/>
+
+                                    <!-- Solo el almacén origen puede corregir esta cantidad
+                                        cuando la transferencia está OBSERVADA y la línea
+                                        tiene una diferencia. -->
+                                    <field name="qty_sent"
+                                        string="Cantidad enviada"
+                                        readonly="not (parent.state == 'observed' and parent.is_source_user and has_difference)"/>
+
+                                    <field name="uom_id"
+                                        string="Unidad"
+                                        readonly="1"/>
+
+                                    <!-- Solo el almacén destino registra la cantidad recibida
+                                        mientras la transferencia está POR RECIBIR. -->
+                                    <field name="qty_received"
+                                        string="Cantidad recibida"
+                                        readonly="parent.state != 'waiting' or not parent.is_destination_user"/>
+
+                                </list>
+                            </field>
+                        </page>
+
+                        <!-- =================================================
+                             INFORMACIÓN ADICIONAL
+                             Datos automáticos para control y auditoría.
+                             ================================================= -->
+                        <page string="Información adicional">
+                            <group>
+
+                                <group>
+                                    <field name="sent_by_id"
+                                           string="Enviado por"
+                                           readonly="1"/>
+
+                                    <field name="sent_date"
+                                           string="Fecha de envío"
+                                           readonly="1"/>
+                                </group>
+
+                                <group>
+                                    <field name="observed_by_id"
+                                           string="Observado por"
+                                           readonly="1"/>
+
+                                    <field name="observed_date"
+                                           string="Fecha de observación"
+                                           readonly="1"/>
+
+                                    <field name="received_by_id"
+                                           string="Recibido por"
+                                           readonly="1"/>
+
+                                    <field name="received_date"
+                                           string="Fecha de recepción"
+                                           readonly="1"/>
+                                </group>
+
+                            </group>
+                        </page>
+
+                        <!-- =================================================
+                             NOTA
+                             Espacio libre para observaciones del traslado.
+                             ================================================= -->
+                        <page string="Nota">
+                            <field name="note"
+                                   placeholder="Escriba aquí alguna observación sobre el traslado..."/>
+                        </page>
+
+                    </notebook>
+
+                </sheet>
+
+                <!-- ============================================================
+                    CAMPOS TÉCNICOS
+                    Permiten saber si el usuario conectado pertenece al origen
+                    o al destino de esta transferencia.
+                    No se muestran en pantalla.
+                    ============================================================ -->
+                <field name="is_source_user" invisible="1"/>
+                <field name="is_destination_user" invisible="1"/>
+
+            </form>
+
+        </field>
+    </record>
+
+
+        <!-- ============================================================
+         ACCIÓN
+         Permite abrir la lista y formulario del nuevo modelo.
+         ============================================================ -->
+    <record id="action_dt_store_transfer" model="ir.actions.act_window">
+        <field name="name">Transferencias entre Tiendas</field>
+        <field name="res_model">dt.store.transfer</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>
