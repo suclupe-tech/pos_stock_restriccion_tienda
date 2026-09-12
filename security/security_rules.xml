@@ -150,4 +150,60 @@
         </field>
     </record>
 
+    <!-- ============================================================
+         11. MOVIMIENTOS INTERNOS / HISTORIAL ANTERIOR
+
+         Protege la lectura de stock.picking a nivel de servidor.
+
+         Para los traslados internos:
+         - una tienda solo puede consultar movimientos donde alguno
+           de sus almacenes participe como origen o destino;
+         - también puede consultar movimientos técnicos TRF/DEV
+           relacionados con una transferencia donde participe.
+
+         Las demás operaciones de inventario (recepciones, entregas,
+         etc.) mantienen el comportamiento que ya tenían.
+
+         Esta regla se aplica solamente a LECTURA.
+         Las restricciones de creación, edición, validación y
+         eliminación del historial se controlan en stock_picking.py.
+         ============================================================ -->
+
+    <record id="rule_stock_picking_internal_tienda"
+            model="ir.rule">
+
+        <field name="name">
+            Traslados internos solo de mis almacenes
+        </field>
+
+        <field name="model_id"
+               ref="stock.model_stock_picking"/>
+
+        <field name="groups"
+               eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
+
+                <field name="domain_force">
+            [
+                '|',
+                ('picking_type_id.code', '!=', 'internal'),
+                '|', '|', '|',
+                ('location_id.warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+                ('location_dest_id.warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+                ('store_transfer_id.source_warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+                ('store_transfer_id.destination_warehouse_id', 'in', user.allowed_warehouse_ids.ids)
+            ]
+        </field>
+
+        <!--
+            Solo restringimos la lectura mediante esta regla.
+            No interferimos con la creación/actualización técnica
+            que necesitan TRF y DEV.
+        -->
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="False"/>
+        <field name="perm_create" eval="False"/>
+        <field name="perm_unlink" eval="False"/>
+
+    </record>    
+
 </odoo>

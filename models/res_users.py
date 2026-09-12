@@ -248,3 +248,55 @@ class ResUsers(models.Model):
                 ),
             },
         }
+
+    # ============================================================
+    # HISTORIAL DE TRANSFERENCIAS ANTERIORES
+    #
+    # Abre los traslados internos realizados antes de implementar
+    # el nuevo flujo TRF/DEV.
+    #
+    # Reglas:
+    # - solo movimientos internos;
+    # - excluye movimientos técnicos TRF/DEV;
+    # - el usuario solo ve movimientos donde alguno de sus
+    #   almacenes participa como origen o destino;
+    # - utiliza las vistas especiales de solo lectura.
+    # ============================================================
+    def action_historial_transferencias_anteriores(self):
+        self.ensure_one()
+
+        user = self.env.user
+
+        warehouses = user.allowed_warehouse_ids or user.warehouse_id
+
+        # Si el usuario no tiene almacenes configurados,
+        # no debe visualizar transferencias antiguas.
+        if not warehouses:
+            domain = [("id", "=", False)]
+
+        else:
+            domain = [
+                ("picking_type_id.code", "=", "internal"),
+                ("is_store_transfer_technical", "=", False),
+                "|",
+                (
+                    "location_id.warehouse_id",
+                    "in",
+                    warehouses.ids,
+                ),
+                (
+                    "location_dest_id.warehouse_id",
+                    "in",
+                    warehouses.ids,
+                ),
+            ]
+
+        # Recuperamos la acción que ya creamos para el historial.
+        action = self.env.ref(
+            "pos_stock_restriccion_tienda." "action_picking_legacy_history"
+        ).read()[0]
+
+        # Aplicamos dinámicamente el dominio según la tienda.
+        action["domain"] = domain
+
+        return action

@@ -24,6 +24,7 @@
         "views/store_transfer_views.xml",
         "views/store_transfer_return_views.xml",
         "views/stock_picking_technical_filter.xml",
+        "views/stock_picking_legacy_history_views.xml",
     ],
     "installable": True,
     "application": False,
