@@ -137,24 +137,100 @@ class StockPicking(models.Model):
     @api.model
     def default_get(self, fields_list):
         res = super().default_get(fields_list)
-        user = self.env.user
 
-        # No modificar el comportamiento normal de administradores
-        # u otros usuarios que no tengan restricción por tienda.
-        if not user.has_group("pos_stock_restriccion_tienda.group_tienda_restringida"):
+        # ============================================================
+        # RESPETAR EL TIPO DE OPERACIÓN ENVIADO POR ODOO
+        #
+        # Cuando el usuario entra desde una tarjeta específica del
+        # Resumen de inventario, Odoo envía default_picking_type_id.
+        # No debemos reemplazarlo por "Traslado interno".
+        # ============================================================
+        if not self._is_restricted_store_user():
             return res
 
-        # Utilizar únicamente la configuración de nuestro módulo.
+        user = self.env.user
+
+        # Almacén configurado para el usuario de tienda.
         warehouse = user.warehouse_id
 
         if not warehouse and user.allowed_warehouse_ids:
             warehouse = user.allowed_warehouse_ids[:1]
 
-        # Si el usuario no tiene almacén configurado,
-        # no seleccionar arbitrariamente otro almacén.
         if not warehouse:
             return res
 
+        # ------------------------------------------------------------
+        # CASO 1:
+        # Odoo ya indicó exactamente qué tipo de operación utilizar.
+        #
+        # Ejemplo:
+        # ALMACEN PLANTA: Entrada de mercadería
+        # ------------------------------------------------------------
+        context_picking_type_id = self.env.context.get(
+            "default_picking_type_id"
+        )
+
+        if context_picking_type_id:
+            picking_type = self.env["stock.picking.type"].browse(
+                context_picking_type_id
+            ).exists()
+
+            if picking_type:
+                res["picking_type_id"] = picking_type.id
+
+                if picking_type.default_location_src_id:
+                    res["location_id"] = (
+                        picking_type.default_location_src_id.id
+                    )
+
+                if picking_type.default_location_dest_id:
+                    res["location_dest_id"] = (
+                        picking_type.default_location_dest_id.id
+                    )
+
+            return res
+
+        # ------------------------------------------------------------
+        # CASO 2:
+        # La acción indica solamente el código de operación.
+        #
+        # Ejemplo:
+        # Recepciones -> incoming
+        # Entregas    -> outgoing
+        # ------------------------------------------------------------
+        picking_type_code = self.env.context.get(
+            "restricted_picking_type_code"
+        )
+
+        if picking_type_code:
+            picking_type = self.env["stock.picking.type"].search(
+                [
+                    ("warehouse_id", "=", warehouse.id),
+                    ("code", "=", picking_type_code),
+                ],
+                limit=1,
+            )
+
+            if picking_type:
+                res["picking_type_id"] = picking_type.id
+
+                if picking_type.default_location_src_id:
+                    res["location_id"] = (
+                        picking_type.default_location_src_id.id
+                    )
+
+                if picking_type.default_location_dest_id:
+                    res["location_dest_id"] = (
+                        picking_type.default_location_dest_id.id
+                    )
+
+            return res
+
+        # ------------------------------------------------------------
+        # CASO 3:
+        # Mantener el comportamiento anterior únicamente como fallback
+        # cuando la acción no especificó ningún tipo de operación.
+        # ------------------------------------------------------------
         picking_type = self.env["stock.picking.type"].search(
             [
                 ("warehouse_id", "=", warehouse.id),
@@ -170,7 +246,9 @@ class StockPicking(models.Model):
                 res["location_id"] = picking_type.default_location_src_id.id
 
             if picking_type.default_location_dest_id:
-                res["location_dest_id"] = picking_type.default_location_dest_id.id
+                res["location_dest_id"] = (
+                    picking_type.default_location_dest_id.id
+                )
 
         return res
 
@@ -179,16 +257,27 @@ class StockPicking(models.Model):
         if not self.picking_type_id:
             return
 
+        # Cargar siempre la ubicación de origen configurada
+        # en el tipo de operación seleccionado.
         if self.picking_type_id.default_location_src_id:
             self.location_id = self.picking_type_id.default_location_src_id
 
-        if self.env.user.has_group(
-            "pos_stock_restriccion_tienda.group_tienda_restringida"
+        # ============================================================
+        # RESTRICCIÓN SOLO PARA TRASLADOS INTERNOS
+        #
+        # En Recepciones y Entregas debemos respetar las ubicaciones
+        # configuradas en el tipo de operación.
+        # ============================================================
+        if (
+            self._is_restricted_store_user()
+            and self.picking_type_id.code == "internal"
         ):
             self.location_dest_id = False
-        elif self.picking_type_id.default_location_dest_id:
-            self.location_dest_id = self.picking_type_id.default_location_dest_id
 
+        elif self.picking_type_id.default_location_dest_id:
+            self.location_dest_id = (
+                self.picking_type_id.default_location_dest_id
+            )
     @api.model
     def get_action_picking_tree_internal(self):
         if self.env.user.has_group(
