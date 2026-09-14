@@ -39,16 +39,26 @@
                 <header>
 
                     <!-- ============================================================
-                        ENVIAR MERCADERÍA
-                        Solo aparece mientras el traslado está en Borrador.
-                        Confirma la salida del almacén origen y deja la mercadería
-                        pendiente de recepción en la ubicación técnica de tránsito.
+                        PASO 1: COMPROBAR STOCK
+
+                        Es el botón inicial de una transferencia en Borrador.
+                        ============================================================ -->
+                    <button name="action_check_stock"
+                            string="Comprobar stock"
+                            type="object"
+                            class="oe_highlight"
+                            invisible="state != 'draft' or stock_checked"/>
+
+                    <!-- ============================================================
+                        PASO 2: ENVIAR MERCADERÍA
+
+                        Solo aparece después de comprobar correctamente el stock.
                         ============================================================ -->
                     <button name="action_send_transfer"
                             string="Enviar mercadería"
                             type="object"
                             class="oe_highlight"
-                            invisible="state != 'draft'"/>
+                            invisible="state != 'draft' or not stock_checked"/>
 
                     <!-- ============================================================
                         CONFIRMAR RECEPCIÓN
@@ -155,6 +165,15 @@
                                 domain="[('id', 'in', allowed_destination_location_ids)]"
                                 readonly="state != 'draft'"/>
 
+                            <!-- Disponibilidad general del TRF -->
+                            <field name="stock_availability_state"
+                                string="Disponibilidad del producto"
+                                widget="badge"
+                                readonly="1"
+                                invisible="stock_availability_state == 'unchecked'"
+                                decoration-success="stock_availability_state == 'available'"
+                                decoration-warning="stock_availability_state == 'unavailable'"/>    
+
                             <!-- Fecha programada: después del envío queda bloqueada -->
                             <field name="scheduled_date"
                                 string="Fecha programada"
@@ -185,10 +204,20 @@
                             <field name="line_ids"
                                 invisible="state != 'draft'">
 
-                                <list editable="bottom">
+                                <list editable="bottom"
+                                        create="1"
+                                        delete="1">
 
                                     <field name="product_id"
                                         string="Producto"/>
+
+                                    <!-- Resultado de disponibilidad por producto -->
+                                    <field name="stock_availability_state"
+                                        string="Disponibilidad"
+                                        widget="badge"
+                                        readonly="1"
+                                        decoration-success="stock_availability_state == 'available'"
+                                        decoration-warning="stock_availability_state == 'unavailable'"/>
 
                                     <field name="qty_sent"
                                         string="Cantidad enviada"/>
@@ -309,6 +338,7 @@
                     ============================================================ -->
                 <field name="is_source_user" invisible="1"/>
                 <field name="is_destination_user" invisible="1"/>
+                <field name="stock_checked" invisible="1"/>
 
             </form>
 

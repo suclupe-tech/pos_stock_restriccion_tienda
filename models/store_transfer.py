@@ -200,6 +200,38 @@ class StoreTransfer(models.Model):
         copy=False,
     )
 
+    # ============================================================
+    # CONTROL DE COMPROBACIÓN DE STOCK
+    #
+    # False -> debe aparecer "Comprobar stock"
+    # True  -> debe aparecer "Enviar mercadería"
+    # ============================================================
+    stock_checked = fields.Boolean(
+        string="Stock comprobado",
+        default=False,
+        readonly=True,
+        copy=False,
+    )
+
+    # ============================================================
+    # DISPONIBILIDAD GENERAL DE LA TRANSFERENCIA
+    #
+    # unchecked   -> todavía no se ha comprobado
+    # available   -> todos los productos tienen stock
+    # unavailable -> uno o más productos no tienen stock suficiente
+    # ============================================================
+    stock_availability_state = fields.Selection(
+        [
+            ("unchecked", "Sin comprobar"),
+            ("available", "Disponible"),
+            ("unavailable", "No disponible"),
+        ],
+        string="Disponibilidad del producto",
+        default="unchecked",
+        readonly=True,
+        copy=False,
+    )
+
     sent_date = fields.Datetime(
         string="Fecha de envío",
         readonly=True,
@@ -472,12 +504,44 @@ class StoreTransfer(models.Model):
 
     def write(self, vals):
 
-        # Administradores/TI y usuarios no restringidos mantienen
-        # el comportamiento normal de Odoo.
-        if not self._is_restricted_store_user():
-            return super().write(vals)
-
         fields_to_write = set(vals)
+
+        # ========================================================
+        # INVALIDAR COMPROBACIÓN DE STOCK
+        #
+        # Si cambia el almacén origen o la ubicación destino,
+        # la comprobación anterior deja de ser válida.
+        # ========================================================
+        must_reset_stock = bool(
+            {"source_warehouse_id", "destination_location_id"} & fields_to_write
+        )
+
+        draft_transfers = self.filtered(lambda transfer: transfer.state == "draft")
+
+        # --------------------------------------------------------
+        # Administradores/TI y usuarios no restringidos mantienen
+        # el comportamiento normal de Odoo, pero también debemos
+        # invalidar una comprobación anterior.
+        # --------------------------------------------------------
+        if not self._is_restricted_store_user():
+
+            result = super().write(vals)
+
+            if must_reset_stock and draft_transfers:
+                draft_transfers._write_internal(
+                    {
+                        "stock_checked": False,
+                        "stock_availability_state": "unchecked",
+                    }
+                )
+
+                draft_transfers.mapped("line_ids")._write_internal(
+                    {
+                        "stock_availability_state": "unchecked",
+                    }
+                )
+
+            return result
 
         # --------------------------------------------------------
         # CAMPOS QUE NUNCA DEBE CAMBIAR MANUALMENTE UNA TIENDA
@@ -589,7 +653,176 @@ class StoreTransfer(models.Model):
                         "general ya no puede modificarse."
                     )
 
-        return super().write(vals)
+        result = super().write(vals)
+
+        # --------------------------------------------------------
+        # Si cambió origen o destino mientras estaba en Borrador,
+        # obligamos a realizar nuevamente la comprobación.
+        # --------------------------------------------------------
+        if must_reset_stock and draft_transfers:
+
+            draft_transfers._write_internal(
+                {
+                    "stock_checked": False,
+                    "stock_availability_state": "unchecked",
+                }
+            )
+
+            draft_transfers.mapped("line_ids")._write_internal(
+                {
+                    "stock_availability_state": "unchecked",
+                }
+            )
+
+        return result
+
+    # ============================================================
+    # COMPROBAR STOCK
+    #
+    # Comprueba la disponibilidad sin mover mercadería.
+    # El resultado queda visible en el formulario:
+    #
+    # - Disponible
+    # - No disponible
+    #
+    # Si todo está disponible, habilita "Enviar mercadería".
+    # ============================================================
+    def action_check_stock(self):
+        self.ensure_one()
+
+        # --------------------------------------------------------
+        # 1. Solo puede comprobarse en Borrador.
+        # --------------------------------------------------------
+        if self.state != "draft":
+            raise UserError(
+                "Solo se puede comprobar stock en una transferencia en Borrador."
+            )
+
+        # --------------------------------------------------------
+        # 2. Validaciones básicas.
+        # --------------------------------------------------------
+        if not self.source_warehouse_id or not self.source_location_id:
+            raise UserError("No se pudo determinar el almacén de origen.")
+
+        if not self.destination_location_id or not self.destination_warehouse_id:
+            raise UserError("Debe seleccionar una ubicación de destino.")
+
+        if self.source_warehouse_id == self.destination_warehouse_id:
+            raise UserError(
+                "El almacén de origen y el almacén de destino deben ser diferentes."
+            )
+
+        if not self.line_ids:
+            raise UserError("Debe agregar al menos un producto a la transferencia.")
+
+        # --------------------------------------------------------
+        # 3. Seguridad del almacén origen.
+        # --------------------------------------------------------
+        user = self.env.user
+        allowed_warehouses = user.allowed_warehouse_ids or user.warehouse_id
+
+        if self.source_warehouse_id not in allowed_warehouses:
+            raise UserError(
+                "No tiene permiso para enviar mercadería desde este almacén."
+            )
+
+        # --------------------------------------------------------
+        # 4. Acumular cantidades por producto.
+        #
+        # Si el mismo producto está repetido en varias líneas,
+        # se valida utilizando la cantidad total solicitada.
+        # --------------------------------------------------------
+        quantities_by_product = {}
+
+        for line in self.line_ids:
+
+            if line.qty_sent <= 0:
+                raise UserError(
+                    f"La cantidad del producto {line.product_id.display_name} "
+                    "debe ser mayor que cero."
+                )
+
+            quantities_by_product.setdefault(line.product_id, 0.0)
+            quantities_by_product[line.product_id] += line.qty_sent
+
+        # --------------------------------------------------------
+        # 5. Comprobar disponibilidad.
+        # --------------------------------------------------------
+        Quant = self.env["stock.quant"]
+
+        product_availability = {}
+        has_insufficient_stock = False
+
+        for product, requested_qty in quantities_by_product.items():
+
+            available_qty = Quant._get_available_quantity(
+                product,
+                self.source_location_id,
+            )
+
+            is_available = (
+                float_compare(
+                    available_qty,
+                    requested_qty,
+                    precision_rounding=product.uom_id.rounding,
+                )
+                >= 0
+            )
+
+            product_availability[product.id] = is_available
+
+            if not is_available:
+                has_insufficient_stock = True
+
+        # --------------------------------------------------------
+        # 6. Guardar disponibilidad de cada producto.
+        # --------------------------------------------------------
+        for line in self.line_ids:
+
+            if product_availability.get(line.product_id.id):
+                line._write_internal(
+                    {
+                        "stock_availability_state": "available",
+                    }
+                )
+            else:
+                line._write_internal(
+                    {
+                        "stock_availability_state": "unavailable",
+                    }
+                )
+
+        # --------------------------------------------------------
+        # 7. Resultado general.
+        # --------------------------------------------------------
+        if has_insufficient_stock:
+
+            self._write_internal(
+                {
+                    "stock_checked": False,
+                    "stock_availability_state": "unavailable",
+                }
+            )
+
+        else:
+
+            self._write_internal(
+                {
+                    "stock_checked": True,
+                    "stock_availability_state": "available",
+                }
+            )
+
+        # --------------------------------------------------------
+        # 8. Recargar para mostrar inmediatamente:
+        #
+        # - Disponible / No disponible
+        # - Comprobar stock / Enviar mercadería
+        # --------------------------------------------------------
+        return {
+            "type": "ir.actions.client",
+            "tag": "reload",
+        }
 
     # ============================================================
     # ENVIAR MERCADERÍA
@@ -602,6 +835,15 @@ class StoreTransfer(models.Model):
     # ============================================================
     def action_send_transfer(self):
         self.ensure_one()
+
+        # --------------------------------------------------------
+        # La mercadería no puede enviarse hasta haber realizado
+        # primero la comprobación de stock.
+        # --------------------------------------------------------
+        if not self.stock_checked:
+            raise UserError(
+                "Primero debe comprobar el stock antes de enviar la mercadería."
+            )
 
         # --------------------------------------------------------
         # 1. Solo una transferencia en Borrador puede enviarse.
@@ -689,12 +931,16 @@ class StoreTransfer(models.Model):
             quantities_by_product[line.product_id] += line.qty_sent
 
         # --------------------------------------------------------
-        # 7. COMPROBAR STOCK DISPONIBLE
+        # 7. VOLVER A COMPROBAR STOCK ANTES DEL ENVÍO
         #
-        # Primero validamos TODOS los productos antes de crear
-        # cualquier movimiento de inventario.
+        # Aunque el stock ya fue comprobado anteriormente,
+        # volvemos a consultarlo porque otra operación podría
+        # haber consumido mercadería mientras tanto.
         # --------------------------------------------------------
         Quant = self.env["stock.quant"]
+
+        product_availability = {}
+        has_insufficient_stock = False
 
         for product, requested_qty in quantities_by_product.items():
 
@@ -703,19 +949,70 @@ class StoreTransfer(models.Model):
                 self.source_location_id,
             )
 
-            if (
+            is_available = (
                 float_compare(
                     available_qty,
                     requested_qty,
                     precision_rounding=product.uom_id.rounding,
                 )
-                < 0
-            ):
-                raise UserError(
-                    f"Stock insuficiente para {product.display_name}.\n\n"
-                    f"Disponible: {available_qty}\n"
-                    f"Solicitado: {requested_qty}"
+                >= 0
+            )
+
+            product_availability[product.id] = is_available
+
+            if not is_available:
+                has_insufficient_stock = True
+
+        # --------------------------------------------------------
+        # Actualizar nuevamente la disponibilidad de cada línea.
+        # --------------------------------------------------------
+        for line in self.line_ids:
+
+            if product_availability.get(line.product_id.id):
+                line._write_internal(
+                    {
+                        "stock_availability_state": "available",
+                    }
                 )
+            else:
+                line._write_internal(
+                    {
+                        "stock_availability_state": "unavailable",
+                    }
+                )
+
+        # --------------------------------------------------------
+        # Si el stock cambió después de la primera comprobación:
+        #
+        # - NO crear movimientos.
+        # - NO descontar stock.
+        # - volver a "Comprobar stock".
+        # - mostrar qué producto ya no está disponible.
+        # --------------------------------------------------------
+        if has_insufficient_stock:
+
+            self._write_internal(
+                {
+                    "stock_checked": False,
+                    "stock_availability_state": "unavailable",
+                }
+            )
+
+            return {
+                "type": "ir.actions.client",
+                "tag": "reload",
+            }
+
+        # --------------------------------------------------------
+        # El stock continúa disponible.
+        # Se mantiene habilitado y continúa el envío normal.
+        # --------------------------------------------------------
+        self._write_internal(
+            {
+                "stock_checked": True,
+                "stock_availability_state": "available",
+            }
+        )
 
         # ========================================================
         # 8. PREPARAR LOS PRODUCTOS DEL MOVIMIENTO DE SALIDA
@@ -1747,7 +2044,87 @@ class StoreTransferLine(models.Model):
                         "a esta transferencia."
                     )
 
-        return super().create(vals_list)
+        lines = super().create(vals_list)
+
+        # ========================================================
+        # INVALIDAR COMPROBACIÓN AL AGREGAR PRODUCTOS
+        #
+        # Si se agrega una nueva línea a una TRF en Borrador,
+        # la comprobación anterior deja de ser válida.
+        # ========================================================
+        draft_transfers = lines.mapped("transfer_id").filtered(
+            lambda transfer: transfer.state == "draft"
+        )
+
+        if draft_transfers:
+
+            draft_transfers._write_internal(
+                {
+                    "stock_checked": False,
+                    "stock_availability_state": "unchecked",
+                }
+            )
+
+            draft_transfers.mapped("line_ids")._write_internal(
+                {
+                    "stock_availability_state": "unchecked",
+                }
+            )
+
+        return lines
+
+    # ============================================================
+    # ELIMINAR PRODUCTO DEL TRF
+    #
+    # Si se elimina una línea en Borrador, cualquier comprobación
+    # de stock anterior deja de ser válida.
+    # ============================================================
+    def unlink(self):
+
+        draft_transfers = self.mapped("transfer_id").filtered(
+            lambda transfer: transfer.state == "draft"
+        )
+
+        # --------------------------------------------------------
+        # Seguridad para usuarios restringidos de tienda.
+        # --------------------------------------------------------
+        if self._is_restricted_store_user():
+
+            for line in self:
+
+                if line.transfer_id.state != "draft":
+                    raise UserError(
+                        "No puede eliminar productos de una transferencia "
+                        "que ya fue enviada."
+                    )
+
+                if not line.transfer_id.is_source_user:
+                    raise UserError(
+                        "Solo el almacén origen puede eliminar productos "
+                        "de esta transferencia."
+                    )
+
+        result = super().unlink()
+
+        # --------------------------------------------------------
+        # Invalidar la comprobación anterior.
+        # --------------------------------------------------------
+        if draft_transfers:
+
+            draft_transfers._write_internal(
+                {
+                    "stock_checked": False,
+                    "stock_availability_state": "unchecked",
+                }
+            )
+
+            draft_transfers.mapped("line_ids")._write_internal(
+                {
+                    "stock_availability_state": "unchecked",
+                }
+            )
+
+        return result
 
     # ============================================================
     # SEGURIDAD DE ESCRITURA DE LAS LÍNEAS DEL TRF
@@ -1783,11 +2160,46 @@ class StoreTransferLine(models.Model):
 
     def write(self, vals):
 
-        # Administradores/TI mantienen comportamiento normal.
-        if not self._is_restricted_store_user():
-            return super().write(vals)
-
         fields_to_write = set(vals)
+
+        # ========================================================
+        # INVALIDAR COMPROBACIÓN DE STOCK
+        #
+        # Si en Borrador cambia el producto o la cantidad enviada,
+        # la comprobación anterior deja de ser válida.
+        # ========================================================
+        must_reset_stock = bool({"product_id", "qty_sent"} & fields_to_write)
+
+        draft_transfers = self.mapped("transfer_id").filtered(
+            lambda transfer: transfer.state == "draft"
+        )
+
+        # --------------------------------------------------------
+        # Administradores/TI mantienen comportamiento normal,
+        # pero también deben invalidar una comprobación anterior.
+        # --------------------------------------------------------
+        if not self._is_restricted_store_user():
+
+            result = super().write(vals)
+
+            if must_reset_stock and draft_transfers:
+
+                # Reiniciar estado general del TRF.
+                draft_transfers._write_internal(
+                    {
+                        "stock_checked": False,
+                        "stock_availability_state": "unchecked",
+                    }
+                )
+
+                # Reiniciar disponibilidad de todas sus líneas.
+                draft_transfers.mapped("line_ids")._write_internal(
+                    {
+                        "stock_availability_state": "unchecked",
+                    }
+                )
+
+            return result
 
         # --------------------------------------------------------
         # CAMPOS TÉCNICOS
@@ -1797,6 +2209,7 @@ class StoreTransferLine(models.Model):
             "transfer_id",
             "original_qty_sent",
             "qty_in_transit",
+            "stock_availability_state",
         }
 
         if fields_to_write & protected_fields:
@@ -1866,7 +2279,32 @@ class StoreTransferLine(models.Model):
                     "No tiene permiso para modificar esos datos " "de la transferencia."
                 )
 
-        return super().write(vals)
+        result = super().write(vals)
+
+        # --------------------------------------------------------
+        # Si cambió producto o cantidad mientras estaba en Borrador,
+        # obligamos a comprobar nuevamente el stock.
+        # --------------------------------------------------------
+        if must_reset_stock and draft_transfers:
+
+            draft_transfers._write_internal(
+                {
+                    "stock_checked": False,
+                    "stock_availability_state": "unchecked",
+                }
+            )
+
+            draft_transfers.mapped("line_ids")._write_internal(
+                {
+                    "stock_availability_state": "unchecked",
+                }
+            )
+
+        return result
+
+    # ============================================================
+    # CAMPOS DE LA LÍNEA DE TRANSFERENCIA
+    # ============================================================
 
     transfer_id = fields.Many2one(
         "dt.store.transfer",
@@ -1894,6 +2332,21 @@ class StoreTransferLine(models.Model):
         default=1.0,
     )
 
+    # ============================================================
+    # DISPONIBILIDAD DEL PRODUCTO
+    # ============================================================
+    stock_availability_state = fields.Selection(
+        [
+            ("unchecked", "Sin comprobar"),
+            ("available", "Disponible"),
+            ("unavailable", "No disponible"),
+        ],
+        string="Disponibilidad",
+        default="unchecked",
+        readonly=True,
+        copy=False,
+    )
+
     original_qty_sent = fields.Float(
         string="Cantidad inicial",
         readonly=True,
@@ -1901,11 +2354,7 @@ class StoreTransferLine(models.Model):
     )
 
     # ============================================================
-    # CANTIDAD QUE ACTUALMENTE ESTÁ EN TRÁNSITO
-    #
-    # Se utilizará para controlar correcciones cuando el destino
-    # reporte que recibió más o menos de lo registrado inicialmente.
-    # Es un dato técnico y no se mostrará a la vendedora.
+    # CANTIDAD ACTUALMENTE EN TRÁNSITO
     # ============================================================
     qty_in_transit = fields.Float(
         string="Cantidad en tránsito",
