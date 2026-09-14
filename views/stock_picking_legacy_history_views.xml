@@ -20,7 +20,7 @@
     <!-- ============================================================
          VISTA LISTA - SOLO LECTURA
          ============================================================ -->
-    <record id="view_picking_legacy_history_list"
+        <record id="view_picking_legacy_history_list"
             model="ir.ui.view">
 
         <field name="name">
@@ -28,6 +28,15 @@
         </field>
 
         <field name="model">stock.picking</field>
+
+        <!-- =====================================================
+             PRIORIDAD DE LA VISTA
+             
+             Esta vista solo debe utilizarse desde "Historial anterior".
+             La prioridad alta evita que Odoo la seleccione como vista
+             predeterminada para Recepciones, Entregas u otros pickings.
+             ===================================================== -->
+        <field name="priority" eval="100"/>
 
         <field name="arch" type="xml">
 
