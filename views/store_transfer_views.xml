@@ -222,6 +222,10 @@
                                     <field name="qty_sent"
                                         string="Cantidad enviada"/>
 
+                                    <field name="available_stock_qty"
+                                        string="Stock disponible"
+                                        readonly="1"/>    
+
                                     <field name="uom_id"
                                         string="Unidad"
                                         readonly="1"/>

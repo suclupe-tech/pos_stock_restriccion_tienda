@@ -538,6 +538,7 @@ class StoreTransfer(models.Model):
                 draft_transfers.mapped("line_ids")._write_internal(
                     {
                         "stock_availability_state": "unchecked",
+                        "available_stock_qty": 0.0,
                     }
                 )
 
@@ -671,6 +672,7 @@ class StoreTransfer(models.Model):
             draft_transfers.mapped("line_ids")._write_internal(
                 {
                     "stock_availability_state": "unchecked",
+                    "available_stock_qty": 0.0,
                 }
             )
 
@@ -751,6 +753,7 @@ class StoreTransfer(models.Model):
         Quant = self.env["stock.quant"]
 
         product_availability = {}
+        product_available_qty = {}
         has_insufficient_stock = False
 
         for product, requested_qty in quantities_by_product.items():
@@ -759,6 +762,8 @@ class StoreTransfer(models.Model):
                 product,
                 self.source_location_id,
             )
+
+            product_available_qty[product.id] = available_qty
 
             is_available = (
                 float_compare(
@@ -783,12 +788,20 @@ class StoreTransfer(models.Model):
                 line._write_internal(
                     {
                         "stock_availability_state": "available",
+                        "available_stock_qty": product_available_qty.get(
+                            line.product_id.id,
+                            0.0,
+                        ),
                     }
                 )
             else:
                 line._write_internal(
                     {
                         "stock_availability_state": "unavailable",
+                        "available_stock_qty": product_available_qty.get(
+                            line.product_id.id,
+                            0.0,
+                        ),
                     }
                 )
 
@@ -940,6 +953,7 @@ class StoreTransfer(models.Model):
         Quant = self.env["stock.quant"]
 
         product_availability = {}
+        product_available_qty = {}
         has_insufficient_stock = False
 
         for product, requested_qty in quantities_by_product.items():
@@ -948,6 +962,8 @@ class StoreTransfer(models.Model):
                 product,
                 self.source_location_id,
             )
+
+            product_available_qty[product.id] = available_qty
 
             is_available = (
                 float_compare(
@@ -972,12 +988,20 @@ class StoreTransfer(models.Model):
                 line._write_internal(
                     {
                         "stock_availability_state": "available",
+                        "available_stock_qty": product_available_qty.get(
+                            line.product_id.id,
+                            0.0,
+                        ),
                     }
                 )
             else:
                 line._write_internal(
                     {
                         "stock_availability_state": "unavailable",
+                        "available_stock_qty": product_available_qty.get(
+                            line.product_id.id,
+                            0.0,
+                        ),
                     }
                 )
 
@@ -1972,6 +1996,38 @@ class StoreTransfer(models.Model):
                     )
                 )
 
+    # ============================================================
+    # ELIMINAR TRANSFERENCIA COMPLETA
+    #
+    # Solo se permite eliminar una TRF mientras permanezca
+    # en estado Borrador.
+    #
+    # Una vez enviada, observada, recibida o anulada,
+    # la transferencia debe conservarse por trazabilidad.
+    # ============================================================
+    def unlink(self):
+
+        for transfer in self:
+
+            if transfer.state != "draft":
+                raise UserError(
+                    "Solo se pueden eliminar transferencias que estén en Borrador."
+                )
+
+            # ----------------------------------------------------
+            # Seguridad adicional para usuarios restringidos.
+            # Solo el almacén origen puede eliminar su TRF.
+            # ----------------------------------------------------
+            if transfer._is_restricted_store_user():
+
+                if not transfer.is_source_user:
+                    raise UserError(
+                        "Solo el almacén de origen puede eliminar "
+                        "esta transferencia."
+                    )
+
+        return super().unlink()
+
 
 class StoreTransferLine(models.Model):
     _name = "dt.store.transfer.line"
@@ -2068,6 +2124,7 @@ class StoreTransferLine(models.Model):
             draft_transfers.mapped("line_ids")._write_internal(
                 {
                     "stock_availability_state": "unchecked",
+                    "available_stock_qty": 0.0,
                 }
             )
 
@@ -2121,6 +2178,7 @@ class StoreTransferLine(models.Model):
             draft_transfers.mapped("line_ids")._write_internal(
                 {
                     "stock_availability_state": "unchecked",
+                    "available_stock_qty": 0.0,
                 }
             )
 
@@ -2196,6 +2254,7 @@ class StoreTransferLine(models.Model):
                 draft_transfers.mapped("line_ids")._write_internal(
                     {
                         "stock_availability_state": "unchecked",
+                        "available_stock_qty": 0.0,
                     }
                 )
 
@@ -2297,6 +2356,7 @@ class StoreTransferLine(models.Model):
             draft_transfers.mapped("line_ids")._write_internal(
                 {
                     "stock_availability_state": "unchecked",
+                    "available_stock_qty": 0.0,
                 }
             )
 
@@ -2343,6 +2403,19 @@ class StoreTransferLine(models.Model):
         ],
         string="Disponibilidad",
         default="unchecked",
+        readonly=True,
+        copy=False,
+    )
+
+    # ============================================================
+    # STOCK DISPONIBLE EN EL ALMACÉN DE ORIGEN
+    #
+    # Se guarda al momento de comprobar stock.
+    # Corresponde únicamente a la ubicación origen de la TRF,
+    # no al stock total de todos los almacenes.
+    # ============================================================
+    available_stock_qty = fields.Float(
+        string="Stock disponible",
         readonly=True,
         copy=False,
     )
