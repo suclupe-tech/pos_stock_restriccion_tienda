@@ -165,6 +165,13 @@
                                 domain="[('id', 'in', allowed_destination_location_ids)]"
                                 readonly="state != 'draft'"/>
 
+                            <!-- Forma de recepción:
+                                solo aparece al usuario DESTINO cuando el almacén es MIXTO -->
+                            <field name="reception_mode"
+                                string="Forma de recepción"
+                                invisible="not destination_requires_reception_choice or state != 'waiting' or not is_destination_user"
+                                readonly="state != 'waiting' or not is_destination_user"/>
+
                             <!-- Disponibilidad general del TRF -->
                             <field name="stock_availability_state"
                                 string="Disponibilidad del producto"
@@ -279,6 +286,16 @@
                                         string="Cantidad recibida"
                                         readonly="parent.state != 'waiting' or not parent.is_destination_user"/>
 
+                                    <!-- Distribución Color x Talla.
+                                        Solo aparece cuando el destino está recibiendo por variantes. -->
+                                    <button name="action_open_variant_distribution"
+                                            type="object"
+                                            string="DISTRIBUIR"
+                                            class="btn-secondary"
+                                            invisible="parent.state != 'waiting'
+                                                    or not parent.is_destination_user
+                                                    or not parent.destination_allows_variant_distribution
+                                                    or (parent.destination_requires_reception_choice and parent.reception_mode != 'variant')"/>
                                 </list>
                             </field>
                         </page>
@@ -342,6 +359,8 @@
                     ============================================================ -->
                 <field name="is_source_user" invisible="1"/>
                 <field name="is_destination_user" invisible="1"/>
+                <field name="destination_allows_variant_distribution" invisible="1"/>
+                <field name="destination_requires_reception_choice" invisible="1"/>
                 <field name="stock_checked" invisible="1"/>
 
             </form>
@@ -350,13 +369,23 @@
     </record>
 
 
-        <!-- ============================================================
+    <!-- ============================================================
          ACCIÓN
          Permite abrir la lista y formulario del nuevo modelo.
-         ============================================================ -->
+        ============================================================ -->
     <record id="action_dt_store_transfer" model="ir.actions.act_window">
         <field name="name">Transferencias entre Tiendas</field>
         <field name="res_model">dt.store.transfer</field>
         <field name="view_mode">list,form</field>
     </record>
+
+    <!-- ============================================================
+        MENÚ DE TRANSFERENCIAS ENTRE TIENDAS
+        ============================================================ -->
+    <menuitem id="menu_dt_store_transfer"
+            name="Transferencias entre Tiendas"
+            parent="stock.menu_stock_warehouse_mgmt"
+            action="action_dt_store_transfer"
+            groups="pos_stock_restriccion_tienda.group_tienda_restringida"
+            sequence="20"/>
 </odoo>

@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<templates xml:space="preserve">
+
+    <t t-name="pos_stock_restriccion_tienda.VariantDistributionAction">
+
+        <div class="p-4">
+
+            <!-- ==================================================
+                 CARGANDO
+                 ================================================== -->
+            <t t-if="state.loading">
+                <div class="text-center py-5">
+                    <i class="fa fa-spinner fa-spin fa-2x"/>
+                    <div class="mt-2">
+                        Cargando variantes...
+                    </div>
+                </div>
+            </t>
+
+            <!-- ==================================================
+                 INFORMACIÓN Y MATRIZ
+                 ================================================== -->
+            <t t-elif="state.info">
+
+                <!-- DATOS DEL MODELO -->
+                <div class="mb-3">
+                    <h3>Distribución por variantes</h3>
+
+                    <div>
+                        <strong>Modelo: </strong>
+                        <span t-esc="state.info.template_name"/>
+                    </div>
+                </div>
+
+                <!-- RESUMEN -->
+                <div class="row mb-3">
+
+                    <div class="col">
+                        <div class="border rounded p-2 text-center">
+                            <strong>Enviado</strong>
+                            <div class="fs-4">
+                                <t t-esc="state.info.qty_sent"/>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col">
+                        <div class="border rounded p-2 text-center">
+                            <strong>Distribuido</strong>
+                            <div class="fs-4">
+                                <t t-esc="distributedTotal"/>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col">
+                        <div class="border rounded p-2 text-center">
+                            <strong>Diferencia</strong>
+                            <div class="fs-4">
+                                <t t-esc="difference"/>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+
+                <!-- ==================================================
+                     MATRIZ DINÁMICA
+                     ================================================== -->
+                <t t-if="state.rowAttribute and state.columnAttribute">
+
+                    <div class="mb-2">
+                        <strong t-esc="state.rowAttribute.name"/>
+                        <span> × </span>
+                        <strong t-esc="state.columnAttribute.name"/>
+                    </div>
+
+                    <div class="table-responsive">
+
+                        <table class="table table-bordered align-middle text-center">
+
+                            <!-- CABECERA -->
+                            <thead>
+                                <tr>
+
+                                    <!-- Nombre del atributo de las filas -->
+                                    <th>
+                                        <t t-esc="state.rowAttribute.name"/>
+                                    </th>
+
+                                    <!-- Valores dinámicos del segundo atributo -->
+                                    <t t-foreach="state.columns"
+                                       t-as="column"
+                                       t-key="column.id">
+
+                                        <th>
+                                            <t t-esc="column.name"/>
+                                        </th>
+
+                                    </t>
+
+                                </tr>
+                            </thead>
+
+                            <!-- FILAS -->
+                            <tbody>
+
+                                <t t-foreach="state.rows"
+                                   t-as="row"
+                                   t-key="row.id">
+
+                                    <tr>
+
+                                        <!-- Valor dinámico de la fila -->
+                                        <th>
+                                            <t t-esc="row.name"/>
+                                        </th>
+
+                                        <!-- CELDAS -->
+                                        <t t-foreach="state.columns"
+                                           t-as="column"
+                                           t-key="column.id">
+
+                                            <t t-set="productId"
+                                               t-value="getProductId(row.id, column.id)"/>
+
+                                            <td>
+
+                                                <!-- Solo mostrar input si la combinación existe -->
+                                                <t t-if="productId">
+
+                                                    <input type="number"
+                                                           min="0"
+                                                           step="1"
+                                                           class="form-control text-center"
+                                                           t-att-value="state.quantities[productId] || 0"
+                                                           t-on-input="(ev) => this.updateQuantity(productId, ev)"/>
+
+                                                </t>
+
+                                                <!-- Combinación inexistente -->
+                                                <t t-else="">
+                                                    <span class="text-muted">
+                                                        —
+                                                    </span>
+                                                </t>
+
+                                            </td>
+
+                                        </t>
+
+                                    </tr>
+
+                                </t>
+
+                            </tbody>
+
+                        </table>
+
+                    </div>
+
+                    <!-- ==================================================
+                        ACCIONES
+                        ================================================== -->
+                    <div class="d-flex justify-content-end mt-3">
+
+                        <button type="button"
+                                class="btn btn-primary"
+                                t-on-click="saveDistribution"
+                                t-att-disabled="state.saving or difference != 0">
+
+                            <t t-if="state.saving">
+                                <i class="fa fa-spinner fa-spin me-1"/>
+                                Guardando...
+                            </t>
+
+                            <t t-else="">
+                                Guardar distribución
+                            </t>
+
+                        </button>
+
+                    </div>
+
+                </t>
+
+                <!-- PRODUCTO SIN DOS ATRIBUTOS -->
+                <t t-else="">
+                    <div class="alert alert-warning">
+                        Este producto no tiene suficientes atributos
+                        para mostrar una matriz de distribución.
+                    </div>
+                </t>
+
+            </t>
+
+        </div>
+
+    </t>
+
+</templates>

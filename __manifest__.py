@@ -5,7 +5,12 @@
     "author": "Detalles Textiles",
     "category": "Inventory/Point of Sale",
     "depends": ["base", "stock", "point_of_sale"],
-    "assets": {},
+    "assets": {
+        "web.assets_backend": [
+            "pos_stock_restriccion_tienda/static/src/backend/js/variant_distribution_action.js",
+            "pos_stock_restriccion_tienda/static/src/backend/xml/variant_distribution_action.xml",
+        ],
+    },
     "data": [
         # permisos y reglas de seguridad
         "security/security_groups.xml",

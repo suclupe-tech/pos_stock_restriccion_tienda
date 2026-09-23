@@ -118,6 +118,123 @@ class StoreTransfer(models.Model):
         readonly=True,
     )
 
+    # ============================================================
+    # DESTINO QUE REQUIERE DISTRIBUCIÓN POR VARIANTES
+    #
+    # Se activa cuando el almacén destino trabaja:
+    # - Por variantes
+    # - Mixto
+    #
+    # No se crea una dependencia obligatoria con dt_catalogo_comercial.
+    # Si el campo product_control_mode no existe, se considera False.
+    # ============================================================
+    destination_allows_variant_distribution = fields.Boolean(
+        string="Destino usa variantes",
+        compute="_compute_destination_allows_variant_distribution",
+    )
+
+    destination_requires_reception_choice = fields.Boolean(
+        string="Destino requiere elegir forma de recepción",
+        compute="_compute_destination_allows_variant_distribution",
+    )
+
+    @api.depends("destination_warehouse_id")
+    def _compute_destination_allows_variant_distribution(self):
+        for transfer in self:
+
+            # --------------------------------------------------------
+            # Lectura técnica del almacén destino.
+            #
+            # El usuario origen puede seleccionar una ubicación destino
+            # permitida aunque no tenga acceso administrativo al almacén.
+            # sudo() se utiliza únicamente para consultar su configuración.
+            # --------------------------------------------------------
+            warehouse = transfer.destination_warehouse_id.sudo()
+
+            mode = (
+                warehouse.product_control_mode
+                if warehouse and "product_control_mode" in warehouse._fields
+                else "model"
+            )
+
+            # El destino permite distribución manual cuando trabaja
+            # por variantes o en modo mixto.
+            transfer.destination_allows_variant_distribution = mode in (
+                "variant",
+                "mixed",
+            )
+
+            # En modo mixto el receptor debe escoger cómo recibirá.
+            transfer.destination_requires_reception_choice = mode == "mixed"
+
+    # ============================================================
+    # MODO DE RECEPCIÓN EN DESTINO
+    #
+    # En un almacén mixto como TDA DIGITAL, el receptor decide:
+    #
+    # - Por modelo:
+    #   recibe la cantidad agrupada, sin matriz.
+    #
+    # - Por variantes:
+    #   debe distribuir manualmente Color x Talla.
+    #
+    # Se deja vacío inicialmente para que el almacén destino
+    # elija explícitamente al momento de recibir.
+    # ============================================================
+    reception_mode = fields.Selection(
+        [
+            ("model", "Por modelo"),
+            ("variant", "Por variantes"),
+        ],
+        string="Forma de recepción",
+        copy=False,
+    )
+
+    # ============================================================
+    # MODO EFECTIVO DE RECEPCIÓN
+    #
+    # Determina cómo debe ingresar la mercadería al destino.
+    #
+    # MODEL:
+    # Siempre recibe agrupado por modelo.
+    #
+    # VARIANT:
+    # Siempre recibe mediante variantes.
+    #
+    # MIXED:
+    # El almacén destino debe elegir explícitamente.
+    # ============================================================
+    def _get_effective_reception_mode(self):
+        self.ensure_one()
+
+        warehouse = self.destination_warehouse_id
+
+        if not warehouse:
+            raise UserError("No se pudo determinar el almacén de destino.")
+
+        # Compatibilidad si dt_catalogo_comercial no estuviera instalado.
+        if "product_control_mode" not in warehouse._fields:
+            return "model"
+
+        warehouse_mode = warehouse.product_control_mode
+
+        if warehouse_mode == "model":
+            return "model"
+
+        if warehouse_mode == "variant":
+            return "variant"
+
+        if warehouse_mode == "mixed":
+            if self.reception_mode not in ("model", "variant"):
+                raise UserError(
+                    "Debe indicar si la mercadería será recibida "
+                    "Por modelo o Por variantes."
+                )
+
+            return self.reception_mode
+
+        return "model"
+
     @api.depends("destination_location_id")
     def _compute_destination_warehouse(self):
         for transfer in self:
@@ -646,7 +763,20 @@ class StoreTransfer(models.Model):
 
             else:
 
-                invalid_fields = fields_to_write - allowed_after_send_fields
+                # Después del envío normalmente solo se modifican las líneas.
+                allowed_fields = set(allowed_after_send_fields)
+
+                # ========================================================
+                # FORMA DE RECEPCIÓN
+                #
+                # Únicamente el almacén DESTINO puede decidir si recibirá
+                # por modelo o por variantes mientras el TRF esté
+                # pendiente de recepción.
+                # ========================================================
+                if transfer.state == "waiting" and transfer.is_destination_user:
+                    allowed_fields.add("reception_mode")
+
+                invalid_fields = fields_to_write - allowed_fields
 
                 if invalid_fields:
                     raise UserError(
@@ -735,6 +865,7 @@ class StoreTransfer(models.Model):
         # se valida utilizando la cantidad total solicitada.
         # --------------------------------------------------------
         quantities_by_product = {}
+        stock_product_by_line = {}
 
         for line in self.line_ids:
 
@@ -744,9 +875,21 @@ class StoreTransfer(models.Model):
                     "debe ser mayor que cero."
                 )
 
-            quantities_by_product.setdefault(line.product_id, 0.0)
-            quantities_by_product[line.product_id] += line.qty_sent
+            # ----------------------------------------------------
+            # Resolver qué product.product representa realmente
+            # el stock en el almacén origen.
+            #
+            # Por modelo  -> SIN CLASIFICAR
+            # Por variante -> variante seleccionada
+            # ----------------------------------------------------
+            stock_product = line._get_stock_product_for_warehouse(
+                self.source_warehouse_id
+            )
 
+            stock_product_by_line[line.id] = stock_product
+
+            quantities_by_product.setdefault(stock_product, 0.0)
+            quantities_by_product[stock_product] += line.qty_sent
         # --------------------------------------------------------
         # 5. Comprobar disponibilidad.
         # --------------------------------------------------------
@@ -784,12 +927,14 @@ class StoreTransfer(models.Model):
         # --------------------------------------------------------
         for line in self.line_ids:
 
-            if product_availability.get(line.product_id.id):
+            stock_product = stock_product_by_line[line.id]
+
+            if product_availability.get(stock_product.id):
                 line._write_internal(
                     {
                         "stock_availability_state": "available",
                         "available_stock_qty": product_available_qty.get(
-                            line.product_id.id,
+                            stock_product.id,
                             0.0,
                         ),
                     }
@@ -799,7 +944,7 @@ class StoreTransfer(models.Model):
                     {
                         "stock_availability_state": "unavailable",
                         "available_stock_qty": product_available_qty.get(
-                            line.product_id.id,
+                            stock_product.id,
                             0.0,
                         ),
                     }
@@ -931,6 +1076,7 @@ class StoreTransfer(models.Model):
         #    en varias líneas pueda superar el stock disponible.
         # --------------------------------------------------------
         quantities_by_product = {}
+        stock_product_by_line = {}
 
         for line in self.line_ids:
 
@@ -940,8 +1086,21 @@ class StoreTransfer(models.Model):
                     "debe ser mayor que cero."
                 )
 
-            quantities_by_product.setdefault(line.product_id, 0.0)
-            quantities_by_product[line.product_id] += line.qty_sent
+            # ----------------------------------------------------
+            # Resolver el producto que realmente representa el
+            # stock en el almacén origen.
+            #
+            # Por modelo   -> SIN CLASIFICAR
+            # Por variante -> variante seleccionada
+            # ----------------------------------------------------
+            stock_product = line._get_stock_product_for_warehouse(
+                self.source_warehouse_id
+            )
+
+            stock_product_by_line[line.id] = stock_product
+
+            quantities_by_product.setdefault(stock_product, 0.0)
+            quantities_by_product[stock_product] += line.qty_sent
 
         # --------------------------------------------------------
         # 7. VOLVER A COMPROBAR STOCK ANTES DEL ENVÍO
@@ -984,12 +1143,17 @@ class StoreTransfer(models.Model):
         # --------------------------------------------------------
         for line in self.line_ids:
 
-            if product_availability.get(line.product_id.id):
+            # Producto que realmente representa el stock en este almacén.
+            # Por modelo   -> SIN CLASIFICAR
+            # Por variante -> variante seleccionada
+            stock_product = stock_product_by_line[line.id]
+
+            if product_availability.get(stock_product.id):
                 line._write_internal(
                     {
                         "stock_availability_state": "available",
                         "available_stock_qty": product_available_qty.get(
-                            line.product_id.id,
+                            stock_product.id,
                             0.0,
                         ),
                     }
@@ -999,7 +1163,7 @@ class StoreTransfer(models.Model):
                     {
                         "stock_availability_state": "unavailable",
                         "available_stock_qty": product_available_qty.get(
-                            line.product_id.id,
+                            stock_product.id,
                             0.0,
                         ),
                     }
@@ -1049,14 +1213,16 @@ class StoreTransfer(models.Model):
 
         for line in self.line_ids:
 
+            stock_product = stock_product_by_line[line.id]
+
             move_values.append(
                 (
                     0,
                     0,
                     {
-                        "product_id": line.product_id.id,
+                        "product_id": stock_product.id,
                         "product_uom_qty": line.qty_sent,
-                        "product_uom": line.uom_id.id,
+                        "product_uom": stock_product.uom_id.id,
                         "location_id": self.source_location_id.id,
                         "location_dest_id": transit_location.id,
                     },
@@ -1253,24 +1419,216 @@ class StoreTransfer(models.Model):
             )
 
         # --------------------------------------------------------
-        # Preparar los movimientos de cada producto.
+        # PREPARAR LOS MOVIMIENTOS DE RECEPCIÓN
+        #
+        # Si la tienda destino recibe por variantes:
+        # 1. Se retira del tránsito el producto enviado originalmente
+        #    (por ejemplo: SIN CLASIFICAR).
+        # 2. Se generan las variantes según la distribución manual
+        #    registrada por la tienda destino.
+        #
+        # Si no trabaja por variantes, se mantiene el flujo normal.
         # --------------------------------------------------------
         move_values = []
 
-        for line in self.line_ids:
-            move_values.append(
-                (
-                    0,
-                    0,
-                    {
-                        "product_id": line.product_id.id,
-                        "product_uom_qty": line.qty_received,
-                        "product_uom": line.uom_id.id,
-                        "location_id": transit_location.id,
-                        "location_dest_id": self.destination_location_id.id,
-                    },
-                )
+        # Modo real de recepción seleccionado para esta transferencia.
+        reception_mode = self._get_effective_reception_mode()
+
+        # Ubicación desde donde saldrán los productos del picking
+        # técnico de recepción.
+        receipt_source_location = transit_location
+
+        # --------------------------------------------------------
+        # RECEPCIÓN POR VARIANTES
+        # --------------------------------------------------------
+        if reception_mode == "variant":
+
+            # Usamos la ubicación virtual de Producción como punto técnico
+            # para transformar el producto SIN CLASIFICAR en sus variantes.
+            classification_location = self.env["stock.location"].search(
+                [
+                    ("usage", "=", "production"),
+                    ("company_id", "in", [False, self.company_id.id]),
+                ],
+                limit=1,
             )
+
+            if not classification_location:
+                raise UserError(
+                    "No se encontró una ubicación virtual de Producción "
+                    "para realizar la distribución por variantes."
+                )
+
+            # El picking que ingresará a la tienda saldrá técnicamente
+            # desde la ubicación de clasificación.
+            receipt_source_location = classification_location
+
+            # Movimientos que retirarán del tránsito el producto original.
+            classification_move_values = []
+
+            for line in self.line_ids:
+
+                distribution = line.variant_distribution or []
+
+                if not distribution:
+                    raise UserError(
+                        "Debes distribuir manualmente las unidades recibidas "
+                        "entre las variantes antes de confirmar."
+                    )
+
+                distributed_qty = sum(
+                    float(item.get("qty", 0.0)) for item in distribution
+                )
+
+                # La suma de las variantes debe ser exactamente igual
+                # a la cantidad recibida físicamente.
+                if (
+                    float_compare(
+                        distributed_qty,
+                        line.qty_received,
+                        precision_rounding=line.uom_id.rounding,
+                    )
+                    != 0
+                ):
+                    raise UserError(
+                        "La distribución por variantes no coincide con "
+                        "la cantidad recibida."
+                    )
+
+                # ----------------------------------------------------
+                # Obtener técnicamente el almacén origen.
+                #
+                # El usuario destino no necesita tener acceso directo
+                # al almacén que realizó el envío.
+                # sudo() se usa únicamente para consultar la
+                # configuración técnica del almacén origen.
+                # ----------------------------------------------------
+                source_warehouse = self.sudo().source_warehouse_id
+
+                stock_product = line._get_stock_product_for_warehouse(
+                    source_warehouse.sudo()
+                )
+
+                # ====================================================
+                # RETIRAR DEL TRÁNSITO EL PRODUCTO REALMENTE ENVIADO
+                #
+                # Ejemplo:
+                # 40 SIN CLASIFICAR
+                # Tránsito -> ubicación técnica de clasificación
+                # ====================================================
+                classification_move_values.append(
+                    {
+                        # Producto real que se encuentra actualmente en tránsito.
+                        "product_id": stock_product.id,
+                        # Cantidad total que debe salir de tránsito para ser clasificada.
+                        "product_uom_qty": line.qty_received,
+                        # Unidad de medida del producto técnico.
+                        "product_uom": stock_product.uom_id.id,
+                        # Origen: ubicación de tránsito.
+                        "location_id": transit_location.id,
+                        # Destino técnico usado para realizar la clasificación.
+                        "location_dest_id": classification_location.id,
+                        # Empresa de la transferencia.
+                        "company_id": self.company_id.id,
+                    }
+                )
+
+                # ====================================================
+                # 2. PREPARAR LAS VARIANTES QUE ENTRARÁN AL DESTINO
+                # Ejemplo:
+                # Blanco/S = 5
+                # Blanco/M = 10
+                # etc.
+                # ====================================================
+                for item in distribution:
+
+                    variant_id = int(item.get("product_id") or 0)
+                    variant_qty = float(item.get("qty") or 0.0)
+
+                    if not variant_id or variant_qty <= 0:
+                        continue
+
+                    variant = self.env["product.product"].browse(variant_id)
+
+                    if not variant.exists():
+                        raise UserError(
+                            "Una de las variantes seleccionadas ya no existe."
+                        )
+
+                    # Seguridad: solamente se permiten variantes
+                    # pertenecientes al mismo modelo/producto plantilla.
+                    if variant.product_tmpl_id != line.product_id.product_tmpl_id:
+                        raise UserError(
+                            "La variante %s no pertenece al mismo producto."
+                            % variant.display_name
+                        )
+
+                    move_values.append(
+                        (
+                            0,
+                            0,
+                            {
+                                "product_id": variant.id,
+                                "product_uom_qty": variant_qty,
+                                "product_uom": variant.uom_id.id,
+                                "location_id": classification_location.id,
+                                "location_dest_id": self.destination_location_id.id,
+                            },
+                        )
+                    )
+
+            # ========================================================
+            # EJECUTAR LA SALIDA DEL PRODUCTO ORIGINAL DEL TRÁNSITO
+            # ========================================================
+            classification_moves = self.env["stock.move"].create(
+                classification_move_values
+            )
+
+            classification_moves._action_confirm()
+            classification_moves._action_assign()
+
+            for move in classification_moves:
+                move.quantity = move.product_uom_qty
+
+            classification_moves._action_done()
+
+        # --------------------------------------------------------
+        # RECEPCIÓN POR MODELO
+        #
+        # Se mueve exactamente el mismo producto técnico que fue
+        # enviado al tránsito.
+        #
+        # Ejemplo:
+        # Huánuco trabaja Por modelo:
+        # SIN CLASIFICAR -> Tránsito -> Destino
+        # --------------------------------------------------------
+        else:
+
+            # Lectura técnica del almacén origen.
+            # El usuario destino no necesita acceso administrativo
+            # al almacén que realizó el envío.
+            source_warehouse = self.sudo().source_warehouse_id
+
+            for line in self.line_ids:
+
+                # Obtener el producto que realmente se encuentra en tránsito.
+                stock_product = line._get_stock_product_for_warehouse(
+                    source_warehouse.sudo()
+                )
+
+                move_values.append(
+                    (
+                        0,
+                        0,
+                        {
+                            "product_id": stock_product.id,
+                            "product_uom_qty": line.qty_received,
+                            "product_uom": stock_product.uom_id.id,
+                            "location_id": transit_location.id,
+                            "location_dest_id": self.destination_location_id.id,
+                        },
+                    )
+                )
 
         # ========================================================
         # CREAR RECEPCIÓN TÉCNICA
@@ -1287,7 +1645,7 @@ class StoreTransfer(models.Model):
                 "is_store_transfer_technical": True,
                 "store_transfer_id": self.id,
                 "picking_type_id": picking_type.id,
-                "location_id": transit_location.id,
+                "location_id": receipt_source_location.id,
                 "location_dest_id": self.destination_location_id.id,
                 "partner_id": self.partner_id.id if self.partner_id else False,
                 "scheduled_date": self.scheduled_date,
@@ -2269,6 +2627,7 @@ class StoreTransferLine(models.Model):
             "original_qty_sent",
             "qty_in_transit",
             "stock_availability_state",
+            "variant_distribution",
         }
 
         if fields_to_write & protected_fields:
@@ -2362,6 +2721,181 @@ class StoreTransferLine(models.Model):
 
         return result
 
+    def action_open_variant_distribution(self):
+        self.ensure_one()
+
+        transfer = self.transfer_id
+
+        # Solo durante la recepción.
+        if transfer.state != "waiting":
+            raise UserError(
+                "La distribución por variantes solo puede realizarse "
+                "cuando la transferencia está Por recibir."
+            )
+
+        # Solo el almacén destino.
+        if not transfer.is_destination_user:
+            raise UserError(
+                "Solo el almacén destino puede distribuir " "las variantes recibidas."
+            )
+
+        # La transferencia debe estar configurada para recibir
+        # específicamente por variantes.
+        if transfer._get_effective_reception_mode() != "variant":
+            raise UserError("Primero seleccione Por variantes en Forma de recepción.")
+
+        # Validamos que existan las variantes y que el usuario
+        # tenga permiso para realizar la distribución.
+        self.get_variant_distribution_info()
+
+        # Abrimos la interfaz dinámica de distribución.
+        return {
+            "type": "ir.actions.client",
+            "tag": "dt_variant_distribution",
+            "name": "Distribuir variantes",
+            "params": {
+                "line_id": self.id,
+            },
+            "target": "new",
+        }
+
+    # ============================================================
+    # PRODUCTO OPERATIVO SEGÚN EL MODO DEL ALMACÉN
+    #
+    # - Almacén por modelo:
+    #     utiliza la variante técnica SIN CLASIFICAR.
+    #
+    # - Almacén por variantes:
+    #     utiliza la variante seleccionada normalmente.
+    #
+    # - Almacén mixto:
+    #     por ahora conserva el producto de la línea.
+    #     Más adelante se definirá el modo de salida de TDA DIGITAL.
+    # ============================================================
+
+    def _get_stock_product_for_warehouse(self, warehouse):
+        self.ensure_one()
+
+        product = self.product_id
+
+        if not warehouse:
+            return product
+
+        # Compatibilidad si dt_catalogo_comercial no estuviera instalado.
+        if "product_control_mode" not in warehouse._fields:
+            return product
+
+        # Solo los almacenes que trabajan por MODELO utilizan
+        # stock técnico SIN CLASIFICAR.
+        if warehouse.product_control_mode != "model":
+            return product
+
+        Product = self.env["product.product"]
+
+        if "is_unclassified_variant" not in Product._fields:
+            raise UserError(
+                "El almacén trabaja por modelo, pero no está disponible "
+                "la configuración de stock SIN CLASIFICAR."
+            )
+
+        template = product.product_tmpl_id
+
+        unclassified_variant = template.with_context(
+            active_test=False
+        ).product_variant_ids.filtered(
+            lambda variant: (variant.active and variant.is_unclassified_variant)
+        )
+
+        if len(unclassified_variant) != 1:
+            raise UserError(
+                f"El producto {template.display_name} debe tener exactamente "
+                "una variante técnica SIN CLASIFICAR antes de operar "
+                "en un almacén configurado Por modelo."
+            )
+
+        return unclassified_variant
+
+    # ============================================================
+    # DATOS PARA DISTRIBUCIÓN DE RECEPCIÓN POR VARIANTES
+    #
+    # Devuelve las variantes reales y activas del modelo.
+    # Se utilizará para construir dinámicamente la matriz
+    # Color x Talla en el almacén destino.
+    # ============================================================
+    def get_variant_distribution_info(self):
+        self.ensure_one()
+
+        transfer = self.transfer_id
+
+        # La matriz solo puede utilizarse cuando esta recepción
+        # concretamente trabaja por variantes.
+        if transfer._get_effective_reception_mode() != "variant":
+            raise UserError(
+                "Esta transferencia está configurada para recibirse Por modelo."
+            )
+
+        # La distribución solo corresponde durante la recepción.
+        if transfer.state != "waiting":
+            raise UserError(
+                "La distribución por variantes solo puede realizarse "
+                "cuando la transferencia está Por recibir."
+            )
+
+        # Solo el almacén destino puede realizar la clasificación.
+        if not transfer.is_destination_user:
+            raise UserError(
+                "Solo el almacén destino puede distribuir las variantes recibidas."
+            )
+
+        template = self.product_id.product_tmpl_id
+
+        variants = template.product_variant_ids.filtered("active")
+
+        # ------------------------------------------------------------
+        # Excluir la variante técnica SIN CLASIFICAR.
+        #
+        # No existe dependencia obligatoria con dt_catalogo_comercial,
+        # por eso primero comprobamos que el campo esté disponible.
+        # ------------------------------------------------------------
+        if "is_unclassified_variant" in variants._fields:
+            variants = variants.filtered(
+                lambda product: not product.is_unclassified_variant
+            )
+
+        variant_data = []
+
+        for variant in variants:
+
+            attributes = []
+
+            for value in variant.product_template_variant_value_ids:
+                attributes.append(
+                    {
+                        "attribute_id": value.attribute_id.id,
+                        "attribute_name": value.attribute_id.name,
+                        "value_id": value.product_attribute_value_id.id,
+                        "value_name": value.name,
+                    }
+                )
+
+            variant_data.append(
+                {
+                    "product_id": variant.id,
+                    "display_name": variant.display_name,
+                    "attributes": attributes,
+                }
+            )
+
+        return {
+            "line_id": self.id,
+            "template_id": template.id,
+            "template_name": template.display_name,
+            "qty_sent": self.qty_sent,
+            "qty_received": self.qty_received,
+            "distribution": self.variant_distribution or [],
+            "variants": variant_data,
+        }
+
     # ============================================================
     # CAMPOS DE LA LÍNEA DE TRANSFERENCIA
     # ============================================================
@@ -2440,6 +2974,27 @@ class StoreTransferLine(models.Model):
         copy=False,
     )
 
+    # ============================================================
+    # DISTRIBUCIÓN DE RECEPCIÓN POR VARIANTES
+    #
+    # Se utiliza cuando el almacén destino trabaja por variantes
+    # o en modo mixto, por ejemplo TDA DIGITAL.
+    #
+    # Ejemplo:
+    # [
+    #     {"product_id": 101, "qty": 5},
+    #     {"product_id": 102, "qty": 10},
+    # ]
+    #
+    # El producto de la línea sigue representando el modelo enviado.
+    # Las variantes exactas serán definidas por el almacén receptor.
+    # ============================================================
+    variant_distribution = fields.Json(
+        string="Distribución por variantes",
+        default=list,
+        copy=False,
+    )
+
     difference_qty = fields.Float(
         string="Diferencia",
         compute="_compute_difference",
@@ -2449,6 +3004,153 @@ class StoreTransferLine(models.Model):
         string="Tiene diferencia",
         compute="_compute_difference",
     )
+
+    # ============================================================
+    # GUARDAR DISTRIBUCIÓN DE RECEPCIÓN POR VARIANTES
+    #
+    # Valida que:
+    # - solo el almacén destino pueda distribuir;
+    # - la transferencia esté Por recibir;
+    # - las variantes pertenezcan al mismo modelo;
+    # - no existan cantidades negativas;
+    # - la suma distribuida sea exactamente igual a lo enviado.
+    # ============================================================
+    def save_variant_distribution(self, distribution):
+        self.ensure_one()
+
+        transfer = self.transfer_id
+
+        # La matriz solo puede utilizarse cuando esta recepción
+        # concretamente trabaja por variantes.
+        if transfer._get_effective_reception_mode() != "variant":
+            raise UserError(
+                "Esta transferencia está configurada para recibirse Por modelo."
+            )
+
+        if transfer.state != "waiting":
+            raise UserError(
+                "La distribución por variantes solo puede registrarse "
+                "cuando la transferencia está Por recibir."
+            )
+
+        if not transfer.is_destination_user:
+            raise UserError(
+                "Solo el almacén destino puede registrar "
+                "la distribución por variantes."
+            )
+
+        if not isinstance(distribution, list):
+            raise ValidationError("La distribución recibida no es válida.")
+
+        template = self.product_id.product_tmpl_id
+
+        valid_variants = template.product_variant_ids.filtered("active")
+
+        # ------------------------------------------------------------
+        # La variante técnica SIN CLASIFICAR no puede utilizarse
+        # como una variante elegible dentro de la distribución.
+        # ------------------------------------------------------------
+        if "is_unclassified_variant" in valid_variants._fields:
+            valid_variants = valid_variants.filtered(
+                lambda product: not product.is_unclassified_variant
+            )
+
+        valid_variant_ids = set(valid_variants.ids)
+
+        clean_distribution = []
+        total_distributed = 0.0
+        used_product_ids = set()
+
+        for item in distribution:
+
+            if not isinstance(item, dict):
+                raise ValidationError("Existe una línea inválida en la distribución.")
+
+            product_id = item.get("product_id")
+            qty = item.get("qty", 0.0)
+
+            if not product_id:
+                continue
+
+            try:
+                qty = float(qty or 0.0)
+            except (TypeError, ValueError):
+                raise ValidationError(
+                    "Existe una cantidad inválida en la distribución."
+                )
+
+            if qty < 0:
+                raise ValidationError(
+                    "Las cantidades por variante no pueden ser negativas."
+                )
+
+            # Las cantidades cero no necesitan almacenarse.
+            if (
+                float_compare(
+                    qty,
+                    0.0,
+                    precision_rounding=self.uom_id.rounding,
+                )
+                == 0
+            ):
+                continue
+
+            if product_id not in valid_variant_ids:
+                raise ValidationError(
+                    "Una de las variantes no pertenece al producto enviado."
+                )
+
+            if product_id in used_product_ids:
+                raise ValidationError(
+                    "Una variante aparece repetida en la distribución."
+                )
+
+            used_product_ids.add(product_id)
+
+            clean_distribution.append(
+                {
+                    "product_id": product_id,
+                    "qty": qty,
+                }
+            )
+
+            total_distributed += qty
+
+        # La suma Color x Talla debe coincidir exactamente con lo enviado.
+        if (
+            float_compare(
+                total_distributed,
+                self.qty_sent,
+                precision_rounding=self.uom_id.rounding,
+            )
+            != 0
+        ):
+            raise ValidationError(
+                _(
+                    "La distribución por variantes debe sumar exactamente %(sent)s. "
+                    "Actualmente suma %(distributed)s."
+                )
+                % {
+                    "sent": self.qty_sent,
+                    "distributed": total_distributed,
+                }
+            )
+
+        # Escritura interna controlada.
+        # qty_received queda sincronizado con el total de la matriz.
+        self._write_internal(
+            {
+                "variant_distribution": clean_distribution,
+                "qty_received": total_distributed,
+            }
+        )
+
+        return {
+            "success": True,
+            "qty_sent": self.qty_sent,
+            "qty_received": total_distributed,
+            "distribution": clean_distribution,
+        }
 
     # ============================================================
     # DIFERENCIA ENTRE ENVIADO Y RECIBIDO
