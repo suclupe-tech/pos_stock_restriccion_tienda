@@ -4,7 +4,11 @@
     "summary": "Restringe usuarios a su almacen y punto de venta asignado",
     "author": "Detalles Textiles",
     "category": "Inventory/Point of Sale",
-    "depends": ["base", "stock", "point_of_sale"],
+    "depends": [
+        "base",
+        "stock",
+        "point_of_sale",
+    ],
     "assets": {
         "web.assets_backend": [
             "pos_stock_restriccion_tienda/static/src/backend/js/variant_distribution_action.js",

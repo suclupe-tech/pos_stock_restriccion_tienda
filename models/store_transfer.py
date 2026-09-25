@@ -310,6 +310,81 @@ class StoreTransfer(models.Model):
         copy=True,
     )
 
+    # ============================================================
+    # PRODUCTOS PERMITIDOS SEGÚN EL MODO DEL ALMACÉN ORIGEN
+    #
+    # Almacén Por modelo:
+    # - Producto ya migrado -> solo SIN CLASIFICAR.
+    # - Producto antiguo sin variantes -> se permite temporalmente.
+    #
+    # Almacén Mixto / Por variantes:
+    # - mantiene disponibles las variantes normales.
+    # ============================================================
+
+    allowed_product_ids = fields.Many2many(
+        "product.product",
+        string="Productos permitidos",
+        compute="_compute_allowed_product_ids",
+    )
+
+    @api.depends(
+        "source_warehouse_id",
+    )
+    def _compute_allowed_product_ids(self):
+        Product = self.env["product.product"]
+
+        for transfer in self:
+
+            products = Product.search(
+                [
+                    ("active", "=", True),
+                ]
+            )
+
+            warehouse = transfer.source_warehouse_id
+
+            # Si el módulo de catálogo comercial no está disponible,
+            # conservar el comportamiento normal.
+            if (
+                not warehouse
+                or "product_control_mode" not in warehouse._fields
+                or warehouse.product_control_mode != "model"
+            ):
+                transfer.allowed_product_ids = products
+                continue
+
+            allowed_products = Product.browse()
+
+            # En un almacén Por modelo debe existir una sola
+            # representación visible por cada modelo.
+            for template in products.mapped("product_tmpl_id"):
+
+                active_variants = template.with_context(
+                    active_test=False
+                ).product_variant_ids.filtered(lambda variant: variant.active)
+
+                if "is_unclassified_variant" not in active_variants._fields:
+                    transfer.allowed_product_ids = products
+                    continue
+
+                technical_variant = active_variants.filtered(
+                    lambda variant: variant.is_unclassified_variant
+                )
+
+                # Producto ya migrado:
+                # mostrar únicamente SIN CLASIFICAR.
+                if len(technical_variant) == 1:
+                    allowed_products |= technical_variant
+                    continue
+
+                # Producto antiguo todavía no migrado:
+                # si solo tiene una variante interna, se mantiene
+                # disponible temporalmente.
+                if not technical_variant and len(active_variants) == 1:
+                    allowed_products |= active_variants
+
+            transfer.allowed_product_ids = allowed_products
+
     sent_by_id = fields.Many2one(
         "res.users",
         string="Enviado por",
@@ -2393,6 +2468,103 @@ class StoreTransferLine(models.Model):
     _order = "id"
 
     # ============================================================
+    # VALIDAR PRODUCTO SEGÚN EL ALMACÉN ORIGEN
+    #
+    # POR MODELO:
+    # - producto migrado -> únicamente SIN CLASIFICAR;
+    # - producto antiguo con una sola variante -> permitido
+    #   temporalmente durante la migración.
+    #
+    # Esto protege también el backend, no solo la vista.
+    # ============================================================
+    def _validate_product_for_source_warehouse(self, transfer, product):
+
+        if not transfer or not product:
+            return
+
+        warehouse = transfer.source_warehouse_id
+
+        if (
+            not warehouse
+            or "product_control_mode" not in warehouse._fields
+            or warehouse.product_control_mode != "model"
+        ):
+            return
+
+        template = product.product_tmpl_id
+
+        active_variants = template.with_context(
+            active_test=False
+        ).product_variant_ids.filtered(lambda variant: variant.active)
+
+        if "is_unclassified_variant" not in active_variants._fields:
+            return
+
+        technical_variants = active_variants.filtered(
+            lambda variant: variant.is_unclassified_variant
+        )
+
+        # --------------------------------------------------------
+        # PRODUCTO YA MIGRADO
+        # --------------------------------------------------------
+        if len(technical_variants) == 1:
+
+            technical_variant = technical_variants[0]
+
+            if product != technical_variant:
+                raise ValidationError(
+                    _(
+                        "El almacén %(warehouse)s trabaja Por modelo.\n\n"
+                        "Para el producto %(product)s únicamente puede "
+                        "seleccionar la variante SIN CLASIFICAR."
+                    )
+                    % {
+                        "warehouse": warehouse.display_name,
+                        "product": template.display_name,
+                    }
+                )
+
+            return
+
+        # --------------------------------------------------------
+        # PRODUCTO ANTIGUO TODAVÍA NO MIGRADO
+        # --------------------------------------------------------
+        if not technical_variants and len(active_variants) == 1:
+
+            if product != active_variants[0]:
+                raise ValidationError(
+                    _("El producto seleccionado no es válido para este almacén.")
+                )
+
+            return
+
+        # --------------------------------------------------------
+        # PRODUCTO CON VARIANTES PERO SIN STOCK POR MODELO
+        # --------------------------------------------------------
+        if not technical_variants:
+            raise ValidationError(
+                _(
+                    "El producto %(product)s maneja variantes, pero todavía "
+                    "no tiene habilitado el stock por modelo.\n\n"
+                    "Un administrador debe utilizar "
+                    "'Habilitar stock por modelo'."
+                )
+                % {
+                    "product": template.display_name,
+                }
+            )
+
+        raise ValidationError(
+            _(
+                "El producto %(product)s tiene más de una variante "
+                "SIN CLASIFICAR. Revise su configuración."
+            )
+            % {
+                "product": template.display_name,
+            }
+        )
+
+    # ============================================================
     # CREACIÓN SEGURA DE LÍNEAS TRF
     #
     # Un usuario de tienda únicamente puede agregar productos
@@ -2457,6 +2629,27 @@ class StoreTransferLine(models.Model):
                         "Solo el almacén origen puede agregar productos "
                         "a esta transferencia."
                     )
+
+        # ========================================================
+        # VALIDAR PRODUCTOS SEGÚN EL MODO DEL ALMACÉN ORIGEN
+        # ========================================================
+        for vals in vals_list:
+
+            transfer_id = vals.get("transfer_id")
+            product_id = vals.get("product_id")
+
+            if not transfer_id or not product_id:
+                continue
+
+            transfer = self.env["dt.store.transfer"].browse(transfer_id).exists()
+
+            product = self.env["product.product"].browse(product_id).exists()
+
+            if transfer and product:
+                self._validate_product_for_source_warehouse(
+                    transfer,
+                    product,
+                )
 
         lines = super().create(vals_list)
 
@@ -2577,6 +2770,22 @@ class StoreTransferLine(models.Model):
     def write(self, vals):
 
         fields_to_write = set(vals)
+
+        # ========================================================
+        # VALIDAR CAMBIO DE PRODUCTO
+        # ========================================================
+        if "product_id" in vals:
+
+            product = self.env["product.product"].browse(vals["product_id"]).exists()
+
+            if not product:
+                raise ValidationError(_("El producto seleccionado no existe."))
+
+            for line in self:
+                self._validate_product_for_source_warehouse(
+                    line.transfer_id,
+                    product,
+                )
 
         # ========================================================
         # INVALIDAR COMPROBACIÓN DE STOCK
@@ -2800,20 +3009,51 @@ class StoreTransferLine(models.Model):
 
         template = product.product_tmpl_id
 
-        unclassified_variant = template.with_context(
+        active_variants = template.with_context(
             active_test=False
-        ).product_variant_ids.filtered(
-            lambda variant: (variant.active and variant.is_unclassified_variant)
+        ).product_variant_ids.filtered(lambda variant: variant.active)
+
+        unclassified_variant = active_variants.filtered(
+            lambda variant: variant.is_unclassified_variant
         )
 
-        if len(unclassified_variant) != 1:
+        # --------------------------------------------------------
+        # PRODUCTO YA MIGRADO
+        #
+        # En un almacén Por modelo el stock siempre corresponde
+        # a la variante técnica SIN CLASIFICAR.
+        # --------------------------------------------------------
+        if len(unclassified_variant) == 1:
+            return unclassified_variant
+
+        # --------------------------------------------------------
+        # PRODUCTO ANTIGUO TODAVÍA NO MIGRADO
+        #
+        # Mientras el modelo continúe teniendo una sola variante
+        # interna, se permite seguir trabajando temporalmente con
+        # esa variante para no detener la operación.
+        # --------------------------------------------------------
+        if not unclassified_variant and len(active_variants) == 1:
+            return active_variants
+
+        # --------------------------------------------------------
+        # CONFIGURACIÓN INVÁLIDA
+        #
+        # Si ya existen varias variantes, un almacén Por modelo
+        # necesita obligatoriamente su variante SIN CLASIFICAR.
+        # --------------------------------------------------------
+        if not unclassified_variant:
             raise UserError(
-                f"El producto {template.display_name} debe tener exactamente "
-                "una variante técnica SIN CLASIFICAR antes de operar "
-                "en un almacén configurado Por modelo."
+                f"El producto {template.display_name} ya maneja variantes "
+                "pero todavía no tiene habilitado el stock por modelo. "
+                "Un administrador debe ejecutar "
+                "'Habilitar stock por modelo'."
             )
 
-        return unclassified_variant
+        raise UserError(
+            f"El producto {template.display_name} tiene más de una "
+            "variante técnica SIN CLASIFICAR. Revise su configuración."
+        )
 
     # ============================================================
     # DATOS PARA DISTRIBUCIÓN DE RECEPCIÓN POR VARIANTES
