@@ -374,6 +374,119 @@
         </field>
     </record>
 
+    <!-- ============================================================
+         BUSCADOR Y FILTROS DE TRANSFERENCIAS
+         ============================================================ -->
+    <record id="view_dt_store_transfer_search" model="ir.ui.view">
+        <field name="name">dt.store.transfer.search</field>
+        <field name="model">dt.store.transfer</field>
+        <field name="arch" type="xml">
+            <search>
+
+                <!-- BÚSQUEDA DIRECTA -->
+                <field name="name" string="Transferencia"/>
+                <field name="source_location_id" string="Origen"/>
+                <field name="destination_location_id" string="Destino"/>
+                <field name="state" string="Estado"/>
+
+                <!-- ESTADOS -->
+                <filter string="Borrador"
+                        name="draft"
+                        domain="[('state', '=', 'draft')]"/>
+
+                <filter string="Por recibir"
+                        name="waiting"
+                        domain="[('state', '=', 'waiting')]"/>
+
+                <filter string="Observadas"
+                        name="observed"
+                        domain="[('state', '=', 'observed')]"/>
+
+                <filter string="Recibidas"
+                        name="received"
+                        domain="[('state', '=', 'received')]"/>
+
+                <filter string="Anuladas"
+                        name="cancelled"
+                        domain="[('state', '=', 'cancelled')]"/>
+
+                <separator/>
+
+                <!-- FECHAS
+                    Odoo genera automáticamente opciones:
+                    Hoy, esta semana, este mes, rango personalizado, etc. -->
+                <filter string="Fecha de envío"
+                        name="sent_date"
+                        date="sent_date"/>
+
+                <filter string="Fecha de recepción"
+                        name="received_date"
+                        date="received_date"/>
+
+                <filter string="Fecha de creación"
+                        name="create_date"
+                        date="create_date"/>
+
+                <!-- AGRUPACIONES -->
+                <group>
+
+                    <filter string="Origen"
+                            name="group_source"
+                            domain="[]"
+                            context="{'group_by': 'source_location_id'}"/>
+
+                    <filter string="Destino"
+                            name="group_destination"
+                            domain="[]"
+                            context="{'group_by': 'destination_location_id'}"/>
+
+                    <filter string="Estado"
+                            name="group_state"
+                            domain="[]"
+                            context="{'group_by': 'state'}"/>
+
+                    <separator/>
+
+                    <!-- FECHA DE ENVÍO -->
+                    <filter string="Envío por día"
+                            name="group_sent_day"
+                            domain="[]"
+                            context="{'group_by': 'sent_date:day'}"/>
+
+                    <filter string="Envío por semana"
+                            name="group_sent_week"
+                            domain="[]"
+                            context="{'group_by': 'sent_date:week'}"/>
+
+                    <filter string="Envío por mes"
+                            name="group_sent_month"
+                            domain="[]"
+                            context="{'group_by': 'sent_date:month'}"/>
+
+                    <separator/>
+
+                    <!-- FECHA DE RECEPCIÓN -->
+                    <filter string="Recepción por día"
+                            name="group_received_day"
+                            domain="[]"
+                            context="{'group_by': 'received_date:day'}"/>
+
+                    <filter string="Recepción por semana"
+                            name="group_received_week"
+                            domain="[]"
+                            context="{'group_by': 'received_date:week'}"/>
+
+                    <filter string="Recepción por mes"
+                            name="group_received_month"
+                            domain="[]"
+                            context="{'group_by': 'received_date:month'}"/>
+
+                </group>
+
+            </search>
+        </field>
+    </record>    
+
 
     <!-- ============================================================
          ACCIÓN
@@ -383,15 +496,8 @@
         <field name="name">Transferencias entre Tiendas</field>
         <field name="res_model">dt.store.transfer</field>
         <field name="view_mode">list,form</field>
-    </record>
 
-    <!-- ============================================================
-        MENÚ DE TRANSFERENCIAS ENTRE TIENDAS
-        ============================================================ -->
-    <menuitem id="menu_dt_store_transfer"
-            name="Transferencias entre Tiendas"
-            parent="stock.menu_stock_warehouse_mgmt"
-            action="action_dt_store_transfer"
-            groups="pos_stock_restriccion_tienda.group_tienda_restringida"
-            sequence="20"/>
+        <!-- Vista de búsqueda con filtros y agrupaciones -->
+        <field name="search_view_id" ref="view_dt_store_transfer_search"/>
+    </record>
 </odoo>

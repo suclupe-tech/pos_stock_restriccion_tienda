@@ -234,6 +234,10 @@ class ResUsers(models.Model):
             "res_model": "dt.store.transfer",
             "view_mode": "list,form",
             "views": [(False, "list"), (False, "form")],
+            # Vista de búsqueda personalizada para Traslados internos
+            "search_view_id": self.env.ref(
+                "pos_stock_restriccion_tienda.view_dt_store_transfer_search"
+            ).id,
             # Solo muestra transferencias donde uno de los
             # almacenes del usuario participa como origen o destino.
             "domain": [
