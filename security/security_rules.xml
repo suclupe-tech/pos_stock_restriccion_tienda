@@ -39,10 +39,11 @@
         <field name="model_id" ref="stock.model_stock_location"/>
         <field name="groups" eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
         <field name="domain_force">
-            ['|', '|',
+            ['|', '|', '|',
             ('warehouse_id', '=', False),
             ('warehouse_id', 'in', user.allowed_warehouse_ids.ids),
-            ('id', 'in', user.destination_location_ids.ids)]
+            ('id', 'in', user.destination_location_ids.ids),
+            ('id', 'in', user.legacy_history_location_ids.ids)]
         </field>
     </record>
 

@@ -14,6 +14,22 @@ class ResUsers(models.Model):
         string="Almacenes permitidos",
     )
 
+    # ============================================================
+    # UBICACIONES DEL HISTORIAL ANTERIOR
+    #
+    # Solo se utilizarán para permitir la lectura de las
+    # ubicaciones que aparecen en transferencias antiguas donde
+    # participa alguno de los almacenes del usuario.
+    #
+    # No se utilizan como destinos para nuevas transferencias.
+    # ============================================================
+    legacy_history_location_ids = fields.Many2many(
+        "stock.location",
+        string="Ubicaciones históricas permitidas",
+        compute="_compute_legacy_history_location_ids",
+        compute_sudo=True,
+    )
+
     destination_location_ids = fields.Many2many(
         "stock.location",
         string="Ubicaciones disponibles como destino",
@@ -114,6 +130,64 @@ class ResUsers(models.Model):
                 parents = parents.mapped("location_id")
 
             user.destination_location_ids = locations_with_parents
+
+    # ============================================================
+    # UBICACIONES PERMITIDAS PARA EL HISTORIAL ANTERIOR
+    #
+    # Busca únicamente transferencias internas antiguas donde
+    # participe alguno de los almacenes permitidos del usuario.
+    #
+    # Solo agrega las ubicaciones de la contraparte necesarias
+    # para consultar y exportar esas transferencias.
+    # ============================================================
+    @api.depends("warehouse_id", "allowed_warehouse_ids", "company_id")
+    def _compute_legacy_history_location_ids(self):
+        Picking = self.env["stock.picking"].sudo()
+
+        for user in self:
+            own_warehouses = user.allowed_warehouse_ids or user.warehouse_id
+
+            if not own_warehouses:
+                user.legacy_history_location_ids = False
+                continue
+
+            # Transferencias antiguas donde participa la tienda
+            pickings = Picking.search(
+                [
+                    ("picking_type_id.code", "=", "internal"),
+                    ("is_store_transfer_technical", "=", False),
+                    "|",
+                    ("location_id.warehouse_id", "in", own_warehouses.ids),
+                    ("location_dest_id.warehouse_id", "in", own_warehouses.ids),
+                ]
+            )
+
+            # Todas las ubicaciones involucradas en esas transferencias
+            locations = pickings.mapped("location_id") | pickings.mapped(
+                "location_dest_id"
+            )
+
+            # Nos interesan únicamente las ubicaciones externas
+            # al almacén propio, ya que las propias ya están permitidas
+            # por la regla normal de seguridad.
+            external_locations = locations.filtered(
+                lambda location: (
+                    location.warehouse_id
+                    and location.warehouse_id not in own_warehouses
+                )
+            )
+
+            # Incluir padres para que Odoo pueda construir correctamente
+            # nombres completos como ALPLA/Existencias/PRENDAS.
+            locations_with_parents = external_locations
+
+            parents = external_locations.mapped("location_id")
+
+            while parents:
+                locations_with_parents |= parents
+                parents = parents.mapped("location_id")
+
+            user.legacy_history_location_ids = locations_with_parents
 
     def action_productos_mi_tienda(self):
         user = self.env.user
