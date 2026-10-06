@@ -14,6 +14,13 @@ class ResUsers(models.Model):
         string="Almacenes permitidos",
     )
 
+    legacy_history_picking_ids = fields.Many2many(
+        "stock.picking",
+        string="Transferencias históricas permitidas",
+        compute="_compute_legacy_history_picking_ids",
+        compute_sudo=True,
+    )
+
     # ============================================================
     # UBICACIONES DEL HISTORIAL ANTERIOR
     #
@@ -132,18 +139,105 @@ class ResUsers(models.Model):
             user.destination_location_ids = locations_with_parents
 
     # ============================================================
+    # TRANSFERENCIAS PERMITIDAS DEL HISTORIAL ANTERIOR
+    #
+    # Incluye:
+    # - movimientos directos de la tienda;
+    # - movimientos anteriores/siguientes enlazados por tránsito;
+    # - documentos relacionados por el mismo origen.
+    #
+    # Ejemplo:
+    # PLANTA -> TRÁNSITO -> HUÁNUCO
+    # Huánuco podrá consultar también PLANTA -> TRÁNSITO.
+    # ============================================================
+    @api.depends("warehouse_id", "allowed_warehouse_ids", "company_id")
+    def _compute_legacy_history_picking_ids(self):
+        Picking = self.env["stock.picking"].sudo()
+
+        for user in self:
+            warehouses = user.allowed_warehouse_ids or user.warehouse_id
+
+            if not warehouses:
+                user.legacy_history_picking_ids = False
+                continue
+
+            # ----------------------------------------------------
+            # 1. Movimientos donde participa directamente la tienda
+            # ----------------------------------------------------
+            allowed_pickings = Picking.search(
+                [
+                    ("company_id", "=", user.company_id.id),
+                    ("picking_type_id.code", "=", "internal"),
+                    ("is_store_transfer_technical", "=", False),
+                    "|",
+                    ("location_id.warehouse_id", "in", warehouses.ids),
+                    ("location_dest_id.warehouse_id", "in", warehouses.ids),
+                ]
+            )
+
+            pending_pickings = allowed_pickings
+            checked_pickings = allowed_pickings
+
+            # ----------------------------------------------------
+            # 2. Seguir la cadena de movimientos.
+            #
+            # Ejemplo:
+            # PLANTA -> TRÁNSITO
+            # TRÁNSITO -> HUÁNUCO
+            # ----------------------------------------------------
+            for _iteration in range(10):
+                if not pending_pickings:
+                    break
+
+                moves = pending_pickings.mapped("move_ids")
+
+                previous_moves = moves.mapped("move_orig_ids")
+                next_moves = moves.mapped("move_dest_ids")
+
+                related_pickings = previous_moves.mapped(
+                    "picking_id"
+                ) | next_moves.mapped("picking_id")
+
+                # ------------------------------------------------
+                # También recuperar pickings que tengan el mismo
+                # documento origen.
+                # ------------------------------------------------
+                origins = [
+                    origin for origin in pending_pickings.mapped("origin") if origin
+                ]
+
+                if origins:
+                    related_pickings |= Picking.search(
+                        [
+                            ("company_id", "=", user.company_id.id),
+                            ("picking_type_id.code", "=", "internal"),
+                            ("is_store_transfer_technical", "=", False),
+                            ("origin", "in", origins),
+                        ]
+                    )
+
+                # Solo movimientos internos antiguos válidos
+                related_pickings = related_pickings.filtered(
+                    lambda picking: picking.company_id == user.company_id
+                    and picking.picking_type_id.code == "internal"
+                    and not picking.is_store_transfer_technical
+                )
+
+                new_pickings = related_pickings - checked_pickings
+
+                if not new_pickings:
+                    break
+
+                checked_pickings |= new_pickings
+                pending_pickings = new_pickings
+
+            user.legacy_history_picking_ids = checked_pickings
+
+    # ============================================================
     # UBICACIONES PERMITIDAS PARA EL HISTORIAL ANTERIOR
-    #
-    # Busca únicamente transferencias internas antiguas donde
-    # participe alguno de los almacenes permitidos del usuario.
-    #
-    # Solo agrega las ubicaciones de la contraparte necesarias
-    # para consultar y exportar esas transferencias.
     # ============================================================
     @api.depends("warehouse_id", "allowed_warehouse_ids", "company_id")
     def _compute_legacy_history_location_ids(self):
-        Picking = self.env["stock.picking"].sudo()
-
         for user in self:
             own_warehouses = user.allowed_warehouse_ids or user.warehouse_id
 
@@ -151,34 +245,23 @@ class ResUsers(models.Model):
                 user.legacy_history_location_ids = False
                 continue
 
-            # Transferencias antiguas donde participa la tienda
-            pickings = Picking.search(
-                [
-                    ("picking_type_id.code", "=", "internal"),
-                    ("is_store_transfer_technical", "=", False),
-                    "|",
-                    ("location_id.warehouse_id", "in", own_warehouses.ids),
-                    ("location_dest_id.warehouse_id", "in", own_warehouses.ids),
-                ]
-            )
+            # Todos los movimientos históricos permitidos,
+            # incluyendo los tramos por tránsito.
+            pickings = user.legacy_history_picking_ids
 
-            # Todas las ubicaciones involucradas en esas transferencias
             locations = pickings.mapped("location_id") | pickings.mapped(
                 "location_dest_id"
             )
 
-            # Nos interesan únicamente las ubicaciones externas
-            # al almacén propio, ya que las propias ya están permitidas
-            # por la regla normal de seguridad.
+            # Permitir únicamente las ubicaciones externas necesarias
+            # para mostrar correctamente el historial.
+            # Aquí también entran ubicaciones de tránsito,
+            # que normalmente no tienen warehouse_id.
             external_locations = locations.filtered(
-                lambda location: (
-                    location.warehouse_id
-                    and location.warehouse_id not in own_warehouses
-                )
+                lambda location: not location.warehouse_id
+                or location.warehouse_id not in own_warehouses
             )
 
-            # Incluir padres para que Odoo pueda construir correctamente
-            # nombres completos como ALPLA/Existencias/PRENDAS.
             locations_with_parents = external_locations
 
             parents = external_locations.mapped("location_id")

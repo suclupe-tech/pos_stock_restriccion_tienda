@@ -184,16 +184,23 @@
                eval="[(4, ref('pos_stock_restriccion_tienda.group_tienda_restringida'))]"/>
 
                 <field name="domain_force">
-            [
-                '|',
-                ('picking_type_id.code', '!=', 'internal'),
-                '|', '|', '|',
-                ('location_id.warehouse_id', 'in', user.allowed_warehouse_ids.ids),
-                ('location_dest_id.warehouse_id', 'in', user.allowed_warehouse_ids.ids),
-                ('store_transfer_id.source_warehouse_id', 'in', user.allowed_warehouse_ids.ids),
-                ('store_transfer_id.destination_warehouse_id', 'in', user.allowed_warehouse_ids.ids)
-            ]
-        </field>
+                    [
+                        '|',
+                        ('picking_type_id.code', '!=', 'internal'),
+
+                        '|', '|', '|', '|',
+
+                        ('location_id.warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+
+                        ('location_dest_id.warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+
+                        ('store_transfer_id.source_warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+
+                        ('store_transfer_id.destination_warehouse_id', 'in', user.allowed_warehouse_ids.ids),
+
+                        ('id', 'in', user.legacy_history_picking_ids.ids)
+                    ]
+                </field>
 
         <!--
             Solo restringimos la lectura mediante esta regla.
