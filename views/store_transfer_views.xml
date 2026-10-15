@@ -11,12 +11,36 @@
         <field name="arch" type="xml">
             <list string="Transferencias entre Tiendas"
                     decoration-muted="state == 'cancelled'">
+
+                <!-- Columnas principales -->
                 <field name="name"/>
-                <!--Origen y destino visible para las tiendas -->
                 <field name="source_location_id"/>
                 <field name="destination_location_id"/>
-                <field name="sent_date"/>
+
+                <!-- Visible por defecto y seleccionable -->
+                <field name="origin_reference"
+                    string="Documento origen"
+                    optional="show"/>
+
+                <field name="sent_date"
+                    string="Fecha de envío"
+                    optional="show"/>
+
+                <field name="sent_by_id"
+                    string="Enviado por"
+                    optional="show"/>
+
+                <!-- Columnas adicionales disponibles en el selector -->
+                <field name="scheduled_date"
+                    string="Fecha del traslado"
+                    optional="hide"/>
+
+                <field name="received_date"
+                    string="Fecha de recepción"
+                    optional="hide"/>
+
                 <field name="state"/>
+
             </list>
         </field>
     </record>
@@ -181,9 +205,11 @@
                                 decoration-success="stock_availability_state == 'available'"
                                 decoration-warning="stock_availability_state == 'unavailable'"/>    
 
-                            <!-- Fecha programada: después del envío queda bloqueada -->
+                            <!-- Fecha declarada del traslado.
+                                Puede corresponder a una fecha anterior si el movimiento
+                                fue comunicado posteriormente. -->
                             <field name="scheduled_date"
-                                string="Fecha programada"
+                                string="Fecha del traslado"
                                 readonly="state != 'draft'"/>
 
                             <!-- Documento origen: después del envío queda bloqueado -->
@@ -447,40 +473,18 @@
 
                     <separator/>
 
-                    <!-- FECHA DE ENVÍO -->
-                    <filter string="Envío por día"
-                            name="group_sent_day"
+                    <!-- FECHAS
+                        Odoo permite elegir internamente:
+                        Año, Trimestre, Mes, Semana y Día. -->
+                    <filter string="Fecha de envío"
+                            name="group_sent_date"
                             domain="[]"
-                            context="{'group_by': 'sent_date:day'}"/>
+                            context="{'group_by': 'sent_date'}"/>
 
-                    <filter string="Envío por semana"
-                            name="group_sent_week"
+                    <filter string="Fecha de recepción"
+                            name="group_received_date"
                             domain="[]"
-                            context="{'group_by': 'sent_date:week'}"/>
-
-                    <filter string="Envío por mes"
-                            name="group_sent_month"
-                            domain="[]"
-                            context="{'group_by': 'sent_date:month'}"/>
-
-                    <separator/>
-
-                    <!-- FECHA DE RECEPCIÓN -->
-                    <filter string="Recepción por día"
-                            name="group_received_day"
-                            domain="[]"
-                            context="{'group_by': 'received_date:day'}"/>
-
-                    <filter string="Recepción por semana"
-                            name="group_received_week"
-                            domain="[]"
-                            context="{'group_by': 'received_date:week'}"/>
-
-                    <filter string="Recepción por mes"
-                            name="group_received_month"
-                            domain="[]"
-                            context="{'group_by': 'received_date:month'}"/>
-
+                            context="{'group_by': 'received_date'}"/>
                 </group>
 
             </search>

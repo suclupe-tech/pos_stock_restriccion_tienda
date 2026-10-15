@@ -1046,16 +1046,27 @@ class StoreTransfer(models.Model):
                 }
             )
 
-        # --------------------------------------------------------
-        # 8. Recargar para mostrar inmediatamente:
-        #
-        # - Disponible / No disponible
-        # - Comprobar stock / Enviar mercadería
-        # --------------------------------------------------------
-        return {
-            "type": "ir.actions.client",
-            "tag": "reload",
-        }
+        # Volver a abrir el mismo traslado utilizando la acción registrada.
+        # Así se actualizan disponibilidad y botones sin perder el breadcrumb.
+        action = self.env.user.action_transferencias_mi_tienda()
+
+        action.update(
+            {
+                "res_id": self.id,
+                "view_mode": "form",
+                "views": [
+                    (
+                        self.env.ref(
+                            "pos_stock_restriccion_tienda.view_dt_store_transfer_form"
+                        ).id,
+                        "form",
+                    )
+                ],
+                "target": "current",
+            }
+        )
+
+        return action
 
     # ============================================================
     # ENVIAR MERCADERÍA
