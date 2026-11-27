@@ -1,6 +1,6 @@
 {
     "name": "Restriccion por Tienda POS y Almacen",
-    "version": "19.0.1.0.0",
+    "version": "19.0.1.1.0",
     "summary": "Restringe usuarios a su almacen y punto de venta asignado",
     "author": "Detalles Textiles",
     "category": "Inventory/Point of Sale",

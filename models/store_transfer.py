@@ -507,6 +507,31 @@ class StoreTransfer(models.Model):
     # la mercadería en tránsito al almacén origen.
     # ============================================================
 
+    # ============================================================
+    # CORRECCIÓN DE CONTEO POR EL DESTINO
+    #
+    # Cuando el destino digitó mal lo recibido y la transferencia
+    # quedó Observada, puede reabrir la recepción para volver a
+    # contar. En "Observada" todavía no se movió mercadería (todo
+    # sigue en tránsito), así que reabrir no mueve stock.
+    # ============================================================
+    count_correction_reason = fields.Text(
+        string="Motivo de la corrección de conteo",
+        copy=False,
+    )
+
+    count_correction_log = fields.Text(
+        string="Historial de correcciones de conteo",
+        readonly=True,
+        copy=False,
+    )
+
+    count_correction_count = fields.Integer(
+        string="Correcciones de conteo",
+        readonly=True,
+        copy=False,
+    )
+
     cancel_reason = fields.Text(
         string="Motivo de anulación",
         readonly=True,
@@ -850,6 +875,11 @@ class StoreTransfer(models.Model):
                 # ========================================================
                 if transfer.state == "waiting" and transfer.is_destination_user:
                     allowed_fields.add("reception_mode")
+
+                # El destino puede escribir el motivo para corregir su
+                # conteo mientras la transferencia está Observada.
+                if transfer.state == "observed" and transfer.is_destination_user:
+                    allowed_fields.add("count_correction_reason")
 
                 invalid_fields = fields_to_write - allowed_fields
 
@@ -1808,6 +1838,87 @@ class StoreTransfer(models.Model):
     #   1 unidad vuelve de Tránsito -> Origen
     #   La transferencia vuelve a "Por recibir".
     # ============================================================
+    def action_reopen_receipt_count(self):
+        """El destino reabre la recepción para corregir su propio conteo.
+
+        Solo mientras la transferencia está Observada y el origen todavía
+        no inició su corrección. La transferencia vuelve a "Por recibir":
+        el destino ingresa las cantidades reales y confirma la recepción
+        con el flujo normal (si coinciden, se recibe; si no, vuelve a
+        quedar Observada).
+        """
+        self.ensure_one()
+
+        if self.state != "observed":
+            raise UserError(
+                "Solo se puede corregir el conteo de una transferencia observada."
+            )
+
+        if self._is_restricted_store_user() and not self.is_destination_user:
+            raise UserError(
+                "Solo el almacén de destino puede corregir el conteo recibido."
+            )
+
+        reason = (self.count_correction_reason or "").strip()
+        if not reason:
+            raise UserError(
+                "Escriba el motivo de la corrección de conteo antes de continuar."
+            )
+
+        # Si el origen ya modificó lo enviado (sin confirmar todavía su
+        # corrección), reabrir dejaría cantidades enviadas que no
+        # coinciden con lo que realmente está en tránsito.
+        lines_changed_by_source = self.line_ids.filtered(
+            lambda line: float_compare(
+                line.qty_sent,
+                line.qty_in_transit,
+                precision_rounding=line.uom_id.rounding,
+            )
+            != 0
+        )
+        if lines_changed_by_source:
+            raise UserError(
+                "El almacén de origen ya empezó a corregir las cantidades "
+                "enviadas. Coordine con el origen: debe terminar o deshacer "
+                "su corrección antes de que el destino vuelva a contar."
+            )
+
+        now_local = fields.Datetime.context_timestamp(self, fields.Datetime.now())
+        entry = "%s - %s: %s" % (
+            now_local.strftime("%d/%m/%Y %H:%M"),
+            self.env.user.name,
+            reason,
+        )
+
+        self._write_internal(
+            {
+                "state": "waiting",
+                "count_correction_reason": False,
+                "count_correction_count": self.count_correction_count + 1,
+                "count_correction_log": "\n".join(
+                    filter(None, [self.count_correction_log, entry])
+                ),
+            }
+        )
+
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Conteo reabierto",
+                "message": (
+                    "La transferencia volvió a 'Por recibir'. Ingrese las "
+                    "cantidades reales recibidas y pulse 'Confirmar recepción'."
+                ),
+                "type": "info",
+                "sticky": False,
+                "next": {
+                    "type": "ir.actions.client",
+                    "tag": "reload",
+                },
+            },
+        }
+
     def action_confirm_correction(self):
         self.ensure_one()
 

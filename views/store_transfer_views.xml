@@ -108,6 +108,18 @@
                             invisible="state != 'observed' or not is_source_user"/>
 
                     <!-- ============================================================
+                        CORREGIR CONTEO (DESTINO)
+
+                        Si el destino digitó mal lo recibido, reabre la recepción
+                        para volver a contar. Requiere motivo.
+                        ============================================================ -->
+                    <button name="action_reopen_receipt_count"
+                            string="Corregir conteo"
+                            type="object"
+                            class="btn-primary"
+                            invisible="state != 'observed' or not is_destination_user"/>
+
+                    <!-- ============================================================
                         ANULAR TRANSFERENCIA
 
                         Solo el almacén origen puede anular.
@@ -153,6 +165,17 @@
                 </header>
 
                 <sheet>
+
+                    <!-- Corrección de conteo: solo destino y solo Observada -->
+                    <div class="alert alert-warning"
+                         role="alert"
+                         invisible="state != 'observed' or not is_destination_user">
+                        La cantidad recibida no coincide con la enviada.
+                        Si fue un error de digitación al recibir, escriba el motivo
+                        y pulse <strong>Corregir conteo</strong> para volver a contar.
+                        <field name="count_correction_reason"
+                               placeholder="Ej.: se digitó 0 por error, llegaron las 40 prendas"/>
+                    </div>
 
                     <!-- Número de transferencia -->
                     <div class="oe_title">
@@ -365,8 +388,20 @@
                                     <field name="received_date"
                                            string="Fecha de recepción"
                                            readonly="1"/>
+
+                                    <field name="count_correction_count"
+                                           readonly="1"
+                                           invisible="not count_correction_count"/>
                                 </group>
 
+                            </group>
+
+                            <group string="Historial de correcciones de conteo"
+                                   invisible="not count_correction_log">
+                                <field name="count_correction_log"
+                                       nolabel="1"
+                                       colspan="2"
+                                       readonly="1"/>
                             </group>
                         </page>
 
